@@ -138,8 +138,10 @@ class StockityAPI:
                 demo.get("currency") if demo else None
             ) or "IDR"
 
-            real_balance = float(real.get("balance", 0)) if real else 0
-            demo_balance = float(demo.get("balance", 0)) if demo else 0
+            # API mengembalikan nilai dalam satuan sen/poin terkecil, dibagi 100
+            # Contoh: 20000000 → Rp 200.000 (bukan Rp 20.000.000)
+            real_balance = float(real.get("balance", 0)) / 100 if real else 0
+            demo_balance = float(demo.get("balance", 0)) / 100 if demo else 0
 
             return UserBalance(
                 real_balance=real_balance,
@@ -313,7 +315,8 @@ class StockityAPI:
                     continue
                 result.append({
                     "transaction_id": item.get("transaction_id", ""),
-                    "amount":         float(item.get("amount", 0)),
+                    # API mengembalikan amount dalam satuan sen/poin terkecil, dibagi 100
+                    "amount":         float(item.get("amount", 0)) / 100,
                     "currency":       item.get("currency_iso", "IDR"),
                     "created_at":     item.get("created_at", 0),    # Unix timestamp
                     "processed_at":   item.get("processed_at", 0),

@@ -948,35 +948,38 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal_min      = fetched[-1][2]
 
     # ── Build baris per user (tanpa masking, tanpa limit) ──
+    now_str = datetime.utcnow().strftime('%d %b %Y %H:%M') + " UTC"
     rows = []
     for i, (email, user_id, balance) in enumerate(fetched, 1):
         rows.append(
-            f"{i}. <code>{email}</code>\n"
-            f"   💵 Real: <b>{balance.real_balance_formatted}</b>  "
-            f"| 🎮 Demo: {balance.demo_balance_formatted}"
+            f"<b>{i}.</b> 📧 <code>{email}</code>\n"
+            f"    🔑 PK : <code>{user_id}</code>\n"
+            f"    💵 Real : <b>{balance.real_balance_formatted}</b>\n"
+            f"    🎮 Demo : {balance.demo_balance_formatted}"
         )
 
     header = (
-        f"💰 <b>ALL SALDO — {len(fetched)}/{total_sessions} berhasil</b>\n"
+        f"💰 <b>ALL SALDO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Berhasil : <b>{len(fetched)}</b> / {total_sessions}"
+        + (f"  ❌ Gagal : <b>{failed_count}</b>" if failed_count else "") + "\n"
+        f"🕐 <code>{now_str}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     footer = (
         f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>RINGKASAN</b>\n"
-        f"   ✅ Berhasil : <code>{len(fetched)}</code>  "
-        f"❌ Gagal : <code>{failed_count}</code>\n"
-        f"   💰 Total Real : <code>{bal_max.display_currency} {total_real:,.2f}</code>\n"
-        f"   🔺 Tertinggi  : <code>{bal_max.real_balance_formatted}</code>\n"
-        f"   🔻 Terendah   : <code>{bal_min.real_balance_formatted}</code>\n"
-        f"   🕐 {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC\n"
+        f"📊 <b>RINGKASAN SALDO REAL</b>\n"
+        f"   💰 Total     : <code>{bal_max.display_currency} {total_real:,.2f}</code>\n"
+        f"   🔺 Tertinggi : <code>{bal_max.real_balance_formatted}</code>\n"
+        f"   🔻 Terendah  : <code>{bal_min.real_balance_formatted}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
 
     LIMIT = 3800  # sedikit di bawah batas Telegram 4096
 
     # Coba kirim 1 pesan saja kalau muat
-    full = header + "\n".join(rows) + footer
+    full = header + "\n\n".join(rows) + footer
     if len(full) <= LIMIT:
         await loading_msg.edit_text(full, parse_mode=ParseMode.HTML)
         return
@@ -991,10 +994,10 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chunks: list[str] = []
     current = header
     for row in rows:
-        candidate = current + row + "\n"
+        candidate = current + row + "\n\n"
         if len(candidate) > LIMIT:
             chunks.append(current.rstrip())
-            current = row + "\n"
+            current = row + "\n\n"
         else:
             current = candidate
     if current.strip():
