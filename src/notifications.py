@@ -127,6 +127,11 @@ class NotificationService:
 
     async def _check_single_balance(self, session):
         """Cek balance single user dan deteksi deposit."""
+        # Skip user yang tidak punya PK tersimpan — token tidak bisa di-refresh
+        # kalau expired, cek balance akan terus gagal tanpa hasil berguna.
+        if not session.password:
+            logger.debug("Skip balance check %s: tidak ada PK", session.user_id)
+            return
         # Ambil balance terakhir dari database
         last_balance_record = await db.get_last_balance(session.user_id)
 

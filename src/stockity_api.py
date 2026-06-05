@@ -6,11 +6,37 @@ Menggunakan curl binary untuk bypass Cloudflare (sama dengan backend).
 
 import asyncio
 import json
+import os
+import shutil
 import subprocess
 from typing import Optional, Dict, Any, List
 
 from config import STOCKITY_API_URL, DEFAULT_USER_AGENT, DEFAULT_TIMEZONE, logger
 from models import UserBalance, UserProfile
+
+
+# ============================================================
+# CURL PATH RESOLUTION
+# Systemd service bisa membatasi PATH hanya ke venv/bin,
+# sehingga "curl" biasa tidak ditemukan. Cari di lokasi umum.
+# ============================================================
+
+def _find_curl() -> str:
+    """Cari curl binary — fallback ke path absolut jika tidak ada di PATH."""
+    found = shutil.which("curl")
+    if found:
+        return found
+    for path in ("/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            logger.info("curl ditemukan di fallback path: %s", path)
+            return path
+    logger.warning(
+        "curl tidak ditemukan di PATH maupun lokasi umum! "
+        "Install dengan: sudo apt install curl"
+    )
+    return "curl"  # akan raise FileNotFoundError saat dipanggil
+
+_CURL_BIN: str = _find_curl()
 
 
 class StockityAPIError(Exception):
@@ -55,7 +81,7 @@ class StockityAPI:
             header_args.extend(["-H", f"{k}: {v}"])
 
         cmd = [
-            "curl", "-s", "-X", "GET", url,
+            _CURL_BIN, "-s", "-X", "GET", url,
             *header_args,
             "-H", "Content-Type: application/json",
             "--max-time", str(timeout),
@@ -91,7 +117,10 @@ class StockityAPI:
         except asyncio.TimeoutError:
             raise StockityAPIError("Request timeout")
         except FileNotFoundError:
-            raise StockityAPIError("curl binary tidak ditemukan. Install curl: sudo apt install curl")
+            raise StockityAPIError(
+                f"curl binary tidak ditemukan di '{_CURL_BIN}'. "
+                "Install: sudo apt install curl"
+            )
         except Exception as e:
             raise StockityAPIError(f"Request error: {str(e)}")
 
@@ -105,7 +134,7 @@ class StockityAPI:
             header_args.extend(["-H", f"{k}: {v}"])
 
         cmd = [
-            "curl", "-s", "-X", "POST", url,
+            _CURL_BIN, "-s", "-X", "POST", url,
             *header_args,
             "-H", "Content-Type: application/json",
             "-d", json.dumps(body),
@@ -139,7 +168,10 @@ class StockityAPI:
         except asyncio.TimeoutError:
             raise StockityAPIError("Request timeout")
         except FileNotFoundError:
-            raise StockityAPIError("curl binary tidak ditemukan")
+            raise StockityAPIError(
+                f"curl binary tidak ditemukan di '{_CURL_BIN}'. "
+                "Install: sudo apt install curl"
+            )
         except StockityAPIError:
             raise
         except Exception as e:
