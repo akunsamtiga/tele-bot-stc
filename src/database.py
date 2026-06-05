@@ -547,9 +547,17 @@ class SupabaseDB:
                 "detected_at": event.detected_at.isoformat(),
                 "transaction_id": event.transaction_id,
             }
-            await asyncio.to_thread(
-                lambda: self.client.table("deposit_events").insert(data).execute()
-            )
+            if event.transaction_id:
+                # Upsert agar tidak crash saat bot restart dengan data yang sama
+                await asyncio.to_thread(
+                    lambda: self.client.table("deposit_events")
+                    .upsert(data, on_conflict="transaction_id")
+                    .execute()
+                )
+            else:
+                await asyncio.to_thread(
+                    lambda: self.client.table("deposit_events").insert(data).execute()
+                )
             return True
         except Exception as e:
             logger.error(f"save_deposit_event error: {e}")

@@ -96,11 +96,15 @@ class NotificationService:
             DEPOSIT_CHECK_INTERVAL,
         )
 
-        # Pre-populate seen transaction IDs dari DB (30 hari terakhir)
-        # agar tidak re-notify saat bot restart
+        # Catat waktu bot mulai — hanya deposit SETELAH ini yang di-notify
+        # (mencegah spam notifikasi untuk deposit lama saat restart)
+        self._bot_started_at: float = datetime.utcnow().timestamp()
+
+        # Pre-populate seen transaction IDs dari semua yang sudah pernah disimpan di DB
+        # agar tidak insert ulang saat restart
         self._seen_txn_ids: set = set()
         try:
-            existing = await db.get_recent_deposits(hours=720)  # 30 hari
+            existing = await db.get_recent_deposits(hours=24 * 365 * 2)  # 2 tahun
             for dep in existing:
                 if getattr(dep, "transaction_id", None):
                     self._seen_txn_ids.add(dep.transaction_id)
@@ -143,15 +147,16 @@ class NotificationService:
         """
         Cek deposit baru untuk satu user.
         Mengambil transactions endpoint lalu filter by transaction_id yang belum pernah dilihat.
-        Hanya proses transaksi dalam 7 hari terakhir untuk menghindari spam saat restart.
+
+        Logika dua tahap:
+        - SIMPAN ke DB: semua deposit yang belum pernah dilihat (agar /depositlog terisi)
+        - NOTIFY Telegram: hanya deposit yang terjadi SETELAH bot start
+          (mencegah banjir notifikasi untuk deposit lama saat restart)
         """
         try:
             transactions = await StockityAPI.get_deposit_transactions_by_session(session)
         except StockityAPIError:
             return
-
-        # Hanya proses transaksi yang dibuat dalam 7 hari terakhir
-        cutoff_ts = (datetime.utcnow() - timedelta(days=7)).timestamp()
 
         for txn in transactions:
             txn_id = txn.get("transaction_id", "")
@@ -162,18 +167,13 @@ class NotificationService:
             if txn_id in self._seen_txn_ids:
                 continue
 
-            # Mark as seen sekarang (sebelum proses) agar tidak double-notify
+            # Mark as seen sekarang (sebelum proses) agar tidak double-process
             self._seen_txn_ids.add(txn_id)
 
-            # Skip kalau transaksi terlalu lama
             created_ts = txn.get("created_at", 0) or txn.get("processed_at", 0)
-            if created_ts and created_ts < cutoff_ts:
-                continue
-
-            # Deposit baru ditemukan!
-            amount    = txn.get("amount", 0)
-            currency  = txn.get("currency", session.currency or "IDR")
-            detected  = (
+            amount     = txn.get("amount", 0)
+            currency   = txn.get("currency", session.currency or "IDR")
+            detected   = (
                 datetime.utcfromtimestamp(created_ts)
                 if created_ts else datetime.utcnow()
             )
@@ -190,13 +190,22 @@ class NotificationService:
                 handler_name=txn.get("handler_name", ""),
             )
 
-            # Simpan ke DB
+            # Selalu simpan ke DB (untuk /depositlog dan /depositlog7)
             try:
                 await db.save_deposit_event(event)
             except Exception as e:
                 logger.warning("save_deposit_event error: %s", e)
 
-            # Trigger callbacks (→ send Telegram notification)
+            # Hanya kirim notifikasi untuk deposit yang terjadi SETELAH bot start
+            is_new_deposit = (not created_ts) or (created_ts >= self._bot_started_at)
+            if not is_new_deposit:
+                logger.debug(
+                    "Deposit %s (%s) terlalu lama — disimpan tapi tidak di-notify",
+                    txn_id, detected.strftime("%d %b %Y"),
+                )
+                continue
+
+            # Trigger callbacks (→ kirim Telegram notification)
             for callback in self._deposit_callbacks:
                 try:
                     await callback(event)
