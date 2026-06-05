@@ -26,6 +26,8 @@ from handlers import (
     cmd_saldo, cmd_saldobyemail, cmd_depositlog, cmd_depositlog7,
     # Statistics
     cmd_stats, cmd_cekstatus,
+    # New: aggregate stats
+    cmd_allsaldo, cmd_statsdeposit,
     # Communication
     cmd_broadcast,
     # Callback & Error
@@ -74,6 +76,8 @@ class TelegramAdminBot:
             # Statistics
             CommandHandler("stats", cmd_stats),
             CommandHandler("cekstatus", cmd_cekstatus),
+            CommandHandler("allsaldo", cmd_allsaldo),
+            CommandHandler("statsdeposit", cmd_statsdeposit),
 
             # Communication
             CommandHandler("broadcast", cmd_broadcast),

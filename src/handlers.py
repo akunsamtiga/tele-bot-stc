@@ -4,6 +4,8 @@ Semua perintah bot didefinisikan di sini.
 Mode: PUBLIC — semua user Telegram bisa akses tanpa registrasi admin.
 """
 
+import asyncio
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
@@ -14,7 +16,7 @@ from telegram.constants import ParseMode
 from config import logger, SUPER_ADMIN_CHAT_IDS
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
-from models import UserBalance, UserProfile, BotAdmin
+from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
 
 # ============================================================
 # HELPERS (dipertahankan, tidak dipakai sebagai guard)
@@ -101,8 +103,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\n<b>💰 Saldo & Deposit:</b>\n"
         f"  /saldo [user_id] — Cek saldo akun real by ID\n"
         f"  /saldobyemail [email] — Cek saldo by email\n"
+        f"  /allsaldo — Statistik saldo real SEMUA user\n"
         f"  /depositlog — Log deposit 24 jam terakhir\n"
         f"  /depositlog7 — Log deposit 7 hari terakhir\n"
+        f"  /statsdeposit — Statistik deposit semua user\n"
         f"\n<b>📊 Statistik:</b>\n"
         f"  /stats — Statistik user\n"
         f"  /cekstatus [user_id] — Cek status lengkap user\n"
@@ -812,6 +816,283 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"   Gagal: <code>{failed}</code> admin",
         parse_mode=ParseMode.HTML,
     )
+
+
+# ============================================================
+# ALL SALDO — statistik saldo real semua user
+# ============================================================
+
+async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /allsaldo — Ambil & rangkum saldo akun real seluruh user.
+
+    Alur per user:
+      1. Gunakan stockity_token yang tersimpan di session (fast path).
+      2. Jika token expired → re-login menggunakan email + PK (password),
+         lalu fetch ulang balance dengan token baru.
+      3. Jika re-login pun gagal → catat sebagai 'gagal'.
+
+    Proses berjalan concurrent (maks 5 paralel) dengan progress update
+    setiap 5 user agar tidak trigger Telegram rate-limit.
+    """
+    loading_msg = await update.message.reply_text(
+        "⏳ <b>Mengambil saldo semua user...</b>\n"
+        "Proses ini memakan waktu beberapa menit — harap tunggu.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    sessions = await db.list_sessions(active_only=True, limit=500)
+    if not sessions:
+        await loading_msg.edit_text("ℹ️ Tidak ada session aktif yang ditemukan.")
+        return
+
+    total = len(sessions)
+    results: list[tuple[str, float, str, bool]] = []  # (email, real_bal, currency, ok)
+
+    # Semaphore: maks 5 request concurrent agar tidak overload Stockity
+    sem = asyncio.Semaphore(5)
+
+    async def fetch_one(session) -> tuple[str, float, str, bool]:
+        """Fetch balance satu user — token lama dulu, lalu re-login jika perlu."""
+        async with sem:
+            # ── Strategy 1: gunakan token yang tersimpan ─────────────────────
+            try:
+                bal = await StockityAPI.get_user_balance_by_session(session)
+                return (session.email, bal.real_balance, bal.currency, True)
+            except StockityAPIError:
+                pass
+
+            # ── Strategy 2: re-login dengan email + PK ────────────────────────
+            if session.password:
+                try:
+                    new_token = await StockityAPI.login(
+                        session.email, session.password, session.device_id
+                    )
+                    if new_token:
+                        from models import UserSession as _US
+                        refreshed = _US(
+                            user_id=session.user_id,
+                            email=session.email,
+                            password=session.password,
+                            stockity_token=new_token,
+                            device_id=session.device_id,
+                            device_type=session.device_type,
+                            user_agent=session.user_agent,
+                            user_timezone=session.user_timezone,
+                            currency=session.currency,
+                            currency_iso=session.currency_iso,
+                        )
+                        bal = await StockityAPI.get_user_balance_by_session(refreshed)
+                        return (session.email, bal.real_balance, bal.currency, True)
+                except Exception:
+                    pass
+
+            return (session.email, 0.0, session.currency, False)
+
+    # Proses berurutan dalam batch kecil supaya ada progress update
+    CHUNK = 5
+    last_edit = datetime.utcnow()
+
+    for i in range(0, total, CHUNK):
+        chunk = sessions[i : i + CHUNK]
+        chunk_results = await asyncio.gather(*[fetch_one(s) for s in chunk])
+        results.extend(chunk_results)
+
+        done = min(i + CHUNK, total)
+        # Update progress kalau belum selesai dan sudah > 5 detik sejak edit terakhir
+        elapsed = (datetime.utcnow() - last_edit).total_seconds()
+        if done < total and elapsed >= 5:
+            try:
+                await loading_msg.edit_text(
+                    f"⏳ Mengambil saldo... <code>{done}/{total}</code>\n"
+                    f"Harap tunggu...",
+                    parse_mode=ParseMode.HTML,
+                )
+                last_edit = datetime.utcnow()
+            except Exception:
+                pass
+
+    # ── Agregasi hasil ─────────────────────────────────────────────────────────
+    ok_results    = [(e, b, c) for e, b, c, ok in results if ok]
+    failed_count  = len(results) - len(ok_results)
+
+    # Total per mata uang
+    by_currency: dict[str, float] = defaultdict(float)
+    for _, bal, curr in ok_results:
+        by_currency[curr] += bal
+
+    # Urut: tertinggi dulu
+    sorted_results = sorted(ok_results, key=lambda x: x[1], reverse=True)
+
+    # ── Format output ──────────────────────────────────────────────────────────
+    def mask(email: str) -> str:
+        """Mask email untuk tampilan agregat."""
+        if "@" in email:
+            local, domain = email.split("@", 1)
+            return local[:3] + "***@" + domain
+        return email[:5] + "***"
+
+    lines: list[str] = [
+        f"💰 <b>STATISTIK SALDO REAL — SEMUA USER</b>",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+        f"👥 Total session aktif : <code>{total}</code>",
+        f"✅ Berhasil diambil    : <code>{len(ok_results)}</code>",
+        f"❌ Gagal (token/login) : <code>{failed_count}</code>",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+        f"💵 <b>TOTAL SALDO REAL (per mata uang):</b>",
+    ]
+
+    if by_currency:
+        for curr, total_bal in sorted(by_currency.items(), key=lambda x: x[1], reverse=True):
+            unit = ISO_TO_UNIT.get(curr, curr)
+            lines.append(f"   {curr}: <code>{unit} {total_bal:,.2f}</code>")
+    else:
+        lines.append("   (tidak ada data)")
+
+    lines.append(f"\n📊 <b>TOP 10 SALDO TERTINGGI:</b>")
+    if sorted_results:
+        for rank, (email, bal, curr) in enumerate(sorted_results[:10], 1):
+            unit = ISO_TO_UNIT.get(curr, curr)
+            lines.append(
+                f"   {rank}. <code>{mask(email)}</code>\n"
+                f"       💵 <b>{unit} {bal:,.2f}</b> ({curr})"
+            )
+    else:
+        lines.append("   (tidak ada data)")
+
+    # Saldo terendah (non-nol) untuk gambaran
+    nonzero = [(e, b, c) for e, b, c in sorted_results if b > 0]
+    if len(nonzero) > 3:
+        lines.append(f"\n📉 <b>SALDO TERENDAH (berisi):</b>")
+        for email, bal, curr in nonzero[-3:]:
+            unit = ISO_TO_UNIT.get(curr, curr)
+            lines.append(
+                f"   • <code>{mask(email)}</code>: {unit} {bal:,.2f}"
+            )
+
+    lines += [
+        f"\n━━━━━━━━━━━━━━━━━━━━━",
+        f"🕐 <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ============================================================
+# STATS DEPOSIT — statistik deposit agregat semua user
+# ============================================================
+
+async def cmd_statsdeposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /statsdeposit — Statistik deposit semua user dari deposit_events.
+
+    Menampilkan:
+    - Ringkasan per periode (24h / 7d / 30d): jumlah transaksi, user unik, total nilai
+    - Top 10 depositor 30 hari terakhir
+    - Rata-rata deposit per transaksi
+    """
+    loading_msg = await update.message.reply_text("⏳ Mengambil statistik deposit...")
+
+    # Ambil data dari tiga periode sekaligus
+    deps_24h, deps_7d, deps_30d = await asyncio.gather(
+        db.get_recent_deposits(hours=24),
+        db.get_recent_deposits(hours=168),
+        db.get_recent_deposits(hours=720),
+    )
+
+    if not deps_30d:
+        await loading_msg.edit_text(
+            "ℹ️ Belum ada deposit yang terdeteksi dalam 30 hari terakhir.\n"
+            "Pastikan background deposit-detection loop sudah berjalan."
+        )
+        return
+
+    # ── Helper: aggregate per mata uang ───────────────────────────────────────
+    def sum_by_currency(deps) -> dict[str, float]:
+        acc: dict[str, float] = defaultdict(float)
+        for d in deps:
+            acc[d.currency] += d.amount
+        return dict(acc)
+
+    def format_currency_block(by_curr: dict[str, float]) -> str:
+        if not by_curr:
+            return "   —"
+        lines = []
+        for curr, total in sorted(by_curr.items(), key=lambda x: x[1], reverse=True):
+            unit = ISO_TO_UNIT.get(curr, curr)
+            lines.append(f"   {curr}: <code>{unit} {total:,.2f}</code>")
+        return "\n".join(lines)
+
+    # ── Per-user stats (periode 30 hari) ──────────────────────────────────────
+    user_stats: dict[str, dict] = {}
+    for dep in deps_30d:
+        uid = dep.user_id
+        if uid not in user_stats:
+            user_stats[uid] = {
+                "email": dep.email,
+                "count": 0,
+                "total": 0.0,
+                "currency": dep.currency,
+            }
+        user_stats[uid]["count"] += 1
+        user_stats[uid]["total"] += dep.amount
+
+    unique_30d = len(user_stats)
+    unique_7d  = len({d.user_id for d in deps_7d})
+    unique_24h = len({d.user_id for d in deps_24h})
+
+    # Top 10 berdasarkan total nilai
+    top10 = sorted(user_stats.values(), key=lambda x: x["total"], reverse=True)[:10]
+
+    # Rata-rata per transaksi (30d)
+    avg_30d = (sum(d.amount for d in deps_30d) / len(deps_30d)) if deps_30d else 0.0
+    # Gunakan currency terbanyak untuk rata-rata
+    most_common_curr = max(sum_by_currency(deps_30d), key=sum_by_currency(deps_30d).get) if deps_30d else "IDR"
+    avg_unit = ISO_TO_UNIT.get(most_common_curr, most_common_curr)
+
+    def mask(email: str) -> str:
+        if "@" in email:
+            local, domain = email.split("@", 1)
+            return local[:3] + "***@" + domain
+        return email[:5] + "***"
+
+    # ── Format output ──────────────────────────────────────────────────────────
+    lines: list[str] = [
+        f"📊 <b>STATISTIK DEPOSIT — SEMUA USER</b>",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+        f"",
+        f"<b>📅 24 JAM TERAKHIR</b>",
+        f"   Transaksi : <code>{len(deps_24h)}</code>  |  User unik: <code>{unique_24h}</code>",
+        format_currency_block(sum_by_currency(deps_24h)),
+        f"",
+        f"<b>📅 7 HARI TERAKHIR</b>",
+        f"   Transaksi : <code>{len(deps_7d)}</code>  |  User unik: <code>{unique_7d}</code>",
+        format_currency_block(sum_by_currency(deps_7d)),
+        f"",
+        f"<b>📅 30 HARI TERAKHIR</b>",
+        f"   Transaksi : <code>{len(deps_30d)}</code>  |  User unik: <code>{unique_30d}</code>",
+        f"   Rata-rata / tx: <code>{avg_unit} {avg_30d:,.2f}</code>",
+        format_currency_block(sum_by_currency(deps_30d)),
+        f"",
+        f"<b>🏆 TOP 10 DEPOSITOR (30 hari):</b>",
+    ]
+
+    for rank, u in enumerate(top10, 1):
+        unit = ISO_TO_UNIT.get(u["currency"], u["currency"])
+        lines.append(
+            f"   {rank}. <code>{mask(u['email'])}</code>\n"
+            f"       {u['count']} tx | <b>{unit} {u['total']:,.2f}</b>"
+        )
+
+    lines += [
+        f"",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+        f"🕐 <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>",
+        f"━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 # ============================================================

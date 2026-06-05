@@ -1,0 +1,7 @@
+# Update code dari GitHub lalu restart
+cd ~/tele-bot-stc
+git pull origin main
+sudo systemctl restart telegram-admin-bot
+
+# Cek log kalau ada masalah
+sudo journalctl -u telegram-admin-bot -f --since "1 hour ago"

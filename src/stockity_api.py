@@ -95,6 +95,56 @@ class StockityAPI:
         except Exception as e:
             raise StockityAPIError(f"Request error: {str(e)}")
 
+    @staticmethod
+    async def _curl_post(
+        url: str, body: dict, headers: Dict[str, str], timeout: int = 15
+    ) -> Dict[str, Any]:
+        """HTTP POST menggunakan curl binary (bypass Cloudflare). Digunakan untuk login."""
+        header_args = []
+        for k, v in headers.items():
+            header_args.extend(["-H", f"{k}: {v}"])
+
+        cmd = [
+            "curl", "-s", "-X", "POST", url,
+            *header_args,
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(body),
+            "--max-time", str(timeout),
+            "-w", "\n__HTTP_STATUS__%{http_code}",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
+            stdout_str = stdout.decode("utf-8", errors="replace")
+
+            parts = stdout_str.split("\n__HTTP_STATUS__")
+            status_code = int(parts[1].strip() if len(parts) > 1 else "0")
+            raw_body = parts[0].strip()
+
+            if not raw_body or status_code == 0:
+                raise StockityAPIError("Request timeout atau tidak ada response")
+
+            try:
+                parsed = json.loads(raw_body)
+            except json.JSONDecodeError:
+                raise StockityAPIError(f"Response bukan JSON (HTTP {status_code}): {raw_body[:300]}")
+
+            return {"status": status_code, "data": parsed}
+
+        except asyncio.TimeoutError:
+            raise StockityAPIError("Request timeout")
+        except FileNotFoundError:
+            raise StockityAPIError("curl binary tidak ditemukan")
+        except StockityAPIError:
+            raise
+        except Exception as e:
+            raise StockityAPIError(f"Request error: {str(e)}")
+
     @classmethod
     async def get_balance(
         cls, auth_token: str, device_id: str, timezone: str = DEFAULT_TIMEZONE
@@ -243,6 +293,59 @@ class StockityAPI:
             avatar=profile_data.get("avatar"),
             currency="IDR",  # v1 tidak punya field currency
         )
+
+    @classmethod
+    async def login(
+        cls, email: str, password: str, device_id: str
+    ) -> Optional[str]:
+        """
+        Login ke Stockity API menggunakan email + password (PK dari sessions).
+        Digunakan untuk me-refresh token yang expired saat fetch balance gagal.
+
+        Endpoint: POST /passport/v2/sign_in?locale=id
+        Response:  { data: { authtoken: str, user_id: str } }
+
+        Returns auth token baru jika berhasil, None jika gagal.
+        """
+        url = f"{cls.BASE_URL}/passport/v2/sign_in?locale=id"
+        headers = {
+            "device-id":     device_id,
+            "device-type":   "web",
+            "user-timezone": DEFAULT_TIMEZONE,
+            "accept":        "application/json, text/plain, */*",
+            "User-Agent":    DEFAULT_USER_AGENT,
+            "Origin":        "https://stockity.id",
+            "Referer":       "https://stockity.id/",
+        }
+
+        try:
+            resp = await cls._curl_post(
+                url, {"email": email, "password": password}, headers, timeout=15
+            )
+            status = resp["status"]
+
+            if status == 429:
+                logger.warning(f"[Login] Rate limited (429) untuk {email}")
+                return None
+
+            if status >= 400:
+                logger.warning(f"[Login] Gagal untuk {email}: HTTP {status}")
+                return None
+
+            token: Optional[str] = resp["data"].get("data", {}).get("authtoken")
+            if not token:
+                logger.warning(f"[Login] authtoken tidak ada di response untuk {email}")
+                return None
+
+            logger.info(f"[Login] Berhasil refresh token untuk {email}")
+            return token
+
+        except StockityAPIError as e:
+            logger.warning(f"[Login] StockityAPIError untuk {email}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[Login] Error untuk {email}: {e}")
+            return None
 
     @classmethod
     async def get_user_balance_by_session(
