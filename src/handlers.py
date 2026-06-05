@@ -1,11 +1,9 @@
 """
 Command Handlers untuk Bot Telegram Admin.
 Semua perintah bot didefinisikan di sini.
-Mode: PUBLIC — semua user Telegram bisa akses tanpa registrasi admin.
 """
 
 import asyncio
-from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
@@ -16,22 +14,36 @@ from telegram.constants import ParseMode
 from config import logger, SUPER_ADMIN_CHAT_IDS
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
-from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
+from models import UserBalance, UserProfile, BotAdmin
 
 # ============================================================
-# HELPERS (dipertahankan, tidak dipakai sebagai guard)
+# HELPERS
 # ============================================================
 
 async def check_admin(update: Update) -> bool:
-    """Cek apakah user adalah admin bot (tidak dipakai sebagai guard di mode publik)."""
+    """Cek apakah user adalah admin bot."""
     chat_id = update.effective_user.id
-    return await db.is_bot_admin(chat_id)
+    is_admin = await db.is_bot_admin(chat_id)
+    if not is_admin:
+        await update.message.reply_text(
+            "⛔ <b>Akses Ditolak</b>\n"
+            "Anda tidak memiliki izin untuk mengakses bot ini.",
+            parse_mode=ParseMode.HTML,
+        )
+    return is_admin
 
 
 async def check_super_admin(update: Update) -> bool:
-    """Cek apakah user adalah super admin (tidak dipakai sebagai guard di mode publik)."""
+    """Cek apakah user adalah super admin bot."""
     chat_id = update.effective_user.id
-    return await db.is_super_admin(chat_id)
+    is_sadmin = await db.is_super_admin(chat_id)
+    if not is_sadmin:
+        await update.message.reply_text(
+            "⛔ <b>Akses Ditolak</b>\n"
+            "Hanya super admin yang bisa menggunakan perintah ini.",
+            parse_mode=ParseMode.HTML,
+        )
+    return is_sadmin
 
 
 def format_user_detail(user_id: str, email: str, balance: UserBalance,
@@ -70,52 +82,103 @@ def format_user_detail(user_id: str, email: str, balance: UserBalance,
 # ============================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /start — menyambut semua user."""
+    """Handler untuk /start - inisialisasi admin."""
     user = update.effective_user
-    name = user.first_name or "pengguna"
+    chat_id = user.id
 
-    await update.message.reply_text(
-        f"👋 <b>Selamat datang, {name}!</b>\n\n"
-        f"🤖 Ini adalah <b>Stockity Admin Bot</b> — bot monitoring dan manajemen"
-        f" sistem trading.\n\n"
-        f"📖 Gunakan /help untuk melihat daftar perintah yang tersedia.\n"
-        f"🆔 Chat ID kamu: <code>{user.id}</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    # Cek apakah sudah terdaftar sebagai admin
+    existing = await db.get_bot_admin(chat_id)
+
+    if existing:
+        await update.message.reply_text(
+            f"👋 <b>Selamat datang kembali, {existing.display_name}!</b>\n\n"
+            f"Anda terdaftar sebagai <b>{'Super Admin' if existing.role == 'super_admin' else 'Admin'}</b>.\n"
+            f"Gunakan /help untuk melihat daftar perintah.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Auto-register super admin jika:
+    # 1. SUPER_ADMIN_CHAT_IDS dikonfigurasi dan chat_id ada di daftar
+    # 2. Atau belum ada admin sama sekali
+    admin_count = await db.count_bot_admins()
+
+    is_preconfigured = chat_id in SUPER_ADMIN_CHAT_IDS
+    is_first_admin = admin_count == 0
+
+    if is_preconfigured or is_first_admin:
+        new_admin = BotAdmin(
+            chat_id=chat_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            role="super_admin",
+            is_active=True,
+            created_by=chat_id if is_first_admin else None,
+        )
+        await db.add_bot_admin(new_admin)
+
+        await update.message.reply_text(
+            f"🎉 <b>Selamat datang, Super Admin!</b>\n\n"
+            f"Anda telah terdaftar sebagai super admin pertama.\n"
+            f"Nama: {new_admin.display_name}\n"
+            f"Chat ID: <code>{chat_id}</code>\n\n"
+            f"Gunakan /help untuk melihat daftar perintah.",
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"Super admin registered: {chat_id} ({user.username})")
+    else:
+        await update.message.reply_text(
+            "⛕ <b>Akses Ditolak</b>\n\n"
+            "Anda belum terdaftar sebagai admin bot.\n"
+            "Hubungi super admin untuk mendapatkan akses.",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /help — daftar semua perintah."""
+    """Handler untuk /help - daftar semua perintah."""
+    if not await check_admin(update):
+        return
+
+    is_sadmin = await db.is_super_admin(update.effective_user.id)
+
     text = (
         f"📖 <b>DAFTAR PERINTAH BOT ADMIN</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>🧑‍💼 Manajemen Admin:</b>\n"
-        f"  /admins — Lihat daftar admin bot\n"
-        f"  /addadmin [chat_id] — Tambah admin baru\n"
-        f"  /removeadmin [chat_id] — Hapus admin\n"
-        f"  /toggleadmin [chat_id] — Aktifkan/nonaktifkan admin\n"
+        f"  /admins - Lihat daftar admin bot\n"
+    )
+
+    if is_sadmin:
+        text += (
+            f"  /addadmin [chat_id] - Tambah admin baru\n"
+            f"  /removeadmin [chat_id] - Hapus admin\n"
+            f"  /toggleadmin [chat_id] - Aktifkan/nonaktifkan admin\n"
+        )
+
+    text += (
         f"\n<b>👥 Manajemen User:</b>\n"
-        f"  /users — Lihat daftar user (whitelist)\n"
-        f"  /user [id/email] — Detail user lengkap\n"
-        f"  /search [keyword] — Cari user\n"
-        f"  /aktifkan [email] — Aktifkan user\n"
-        f"  /nonaktifkan [email] — Nonaktifkan user\n"
+        f"  /users - Lihat daftar user (whitelist)\n"
+        f"  /user [id/email] - Detail user lengkap\n"
+        f"  /search [keyword] - Cari user\n"
+        f"  /aktifkan [email] - Aktifkan user\n"
+        f"  /nonaktifkan [email] - Nonaktifkan user\n"
         f"\n<b>💰 Saldo & Deposit:</b>\n"
-        f"  /saldo [user_id] — Cek saldo akun real by ID\n"
-        f"  /saldobyemail [email] — Cek saldo by email\n"
-        f"  /allsaldo — Statistik saldo real SEMUA user\n"
-        f"  /depositlog — Log deposit 24 jam terakhir\n"
-        f"  /depositlog7 — Log deposit 7 hari terakhir\n"
-        f"  /statsdeposit — Statistik deposit semua user\n"
+        f"  /allsaldo - Semua saldo user aktif (live fetch)\n"
+        f"  /saldo [user_id] - Cek saldo akun real by ID\n"
+        f"  /saldobyemail [email] - Cek saldo by email\n"
+        f"  /depositlog - Log deposit 24 jam terakhir\n"
+        f"  /depositlog7 - Log deposit 7 hari terakhir\n"
         f"\n<b>📊 Statistik:</b>\n"
-        f"  /stats — Statistik user\n"
-        f"  /cekstatus [user_id] — Cek status lengkap user\n"
+        f"  /stats - Statistik user\n"
+        f"  /cekstatus [user_id] - Cek status lengkap user\n"
         f"\n<b>📢 Komunikasi:</b>\n"
-        f"  /broadcast [pesan] — Kirim pesan ke semua admin\n"
+        f"  /broadcast [pesan] - Kirim pesan ke semua admin\n"
         f"\n<b>⚙️ Utilitas:</b>\n"
-        f"  /myid — Lihat chat ID kamu\n"
-        f"  /ping — Cek status bot\n"
-        f"  /help — Tampilkan bantuan ini\n"
+        f"  /myid - Lihat chat ID Anda\n"
+        f"  /ping - Cek bot status\n"
+        f"  /help - Tampilkan bantuan ini\n"
         f"\n━━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -123,8 +186,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /ping — cek status bot."""
+    """Handler untuk /ping - cek status bot."""
+    if not await check_admin(update):
+        return
+
     start = datetime.utcnow()
+    # Cek koneksi Supabase
     stats = await db.get_user_statistics()
     elapsed = (datetime.utcnow() - start).total_seconds() * 1000
 
@@ -141,7 +208,7 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /myid — lihat chat ID sendiri."""
+    """Handler untuk /myid - lihat chat ID sendiri."""
     user = update.effective_user
     await update.message.reply_text(
         f"🆔 <b>Chat ID Anda:</b> <code>{user.id}</code>\n"
@@ -156,7 +223,10 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /admins — lihat daftar admin bot."""
+    """Handler untuk /admins - lihat daftar admin bot."""
+    if not await check_admin(update):
+        return
+
     admins = await db.list_bot_admins()
 
     if not admins:
@@ -178,7 +248,10 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /addadmin — tambah admin baru."""
+    """Handler untuk /addadmin - tambah admin baru."""
+    if not await check_super_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -192,9 +265,13 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_chat_id = int(args[0])
     except ValueError:
-        await update.message.reply_text("❌ Chat ID harus berupa angka.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "❌ Chat ID harus berupa angka.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
+    # Cek apakah sudah ada
     existing = await db.get_bot_admin(new_chat_id)
     if existing:
         await update.message.reply_text(
@@ -228,7 +305,10 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /removeadmin — hapus admin."""
+    """Handler untuk /removeadmin - hapus admin."""
+    if not await check_super_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -243,6 +323,7 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Chat ID harus berupa angka.")
         return
 
+    # Tidak boleh hapus diri sendiri
     if target_chat_id == update.effective_user.id:
         await update.message.reply_text("❌ Anda tidak bisa menghapus diri sendiri.")
         return
@@ -258,7 +339,10 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_toggleadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /toggleadmin — aktifkan/nonaktifkan admin."""
+    """Handler untuk /toggleadmin - aktifkan/nonaktifkan admin."""
+    if not await check_super_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -295,14 +379,18 @@ async def cmd_toggleadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /users — lihat daftar user whitelist."""
+    """Handler untuk /users - lihat daftar user whitelist."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     limit = 20
     offset = 0
 
+    # Parse args
     if args:
         try:
-            limit = min(int(args[0]), 50)
+            limit = min(int(args[0]), 50)  # Max 50
         except ValueError:
             pass
         if len(args) > 1:
@@ -334,7 +422,10 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /user — lihat detail user lengkap."""
+    """Handler untuk /user - lihat detail user lengkap."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -349,6 +440,7 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     identifier = args[0]
 
+    # Coba cari sebagai user_id dulu, lalu email
     session = await db.get_session(identifier)
     if not session:
         session = await db.get_session_by_email(identifier)
@@ -360,21 +452,25 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Ambil data whitelist
     whitelist = await db.get_whitelist_user_by_id(session.user_id) or \
                 await db.get_whitelist_user(session.email)
 
+    # Ambil balance dan profile dari Stockity
     try:
         balance = await StockityAPI.get_user_balance_by_session(session)
-    except StockityAPIError:
+    except StockityAPIError as e:
         balance = UserBalance(currency=session.currency)
 
     try:
         profile = await StockityAPI.get_user_profile_by_session(session)
-    except StockityAPIError:
+    except StockityAPIError as e:
         profile = UserProfile(id=0, email=session.email, currency=session.currency)
 
+    # Format response
     text = format_user_detail(session.user_id, session.email, balance, profile, whitelist)
 
+    # Buat keyboard untuk aksi
     keyboard = []
     if whitelist:
         if whitelist.is_active:
@@ -396,7 +492,10 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /search — cari user."""
+    """Handler untuk /search - cari user."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -408,24 +507,24 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyword = " ".join(args).lower()
 
+    # Ambil semua users dan filter
     all_users = await db.list_whitelist_users(limit=500)
-    matched = [
-        user for user in all_users
+    matched = []
+
+    for user in all_users:
         if (keyword in user.email.lower() or
             (user.name and keyword in user.name.lower()) or
-            (user.user_id and keyword in user.user_id.lower()))
-    ]
+            (user.user_id and keyword in user.user_id.lower())):
+            matched.append(user)
 
     if not matched:
-        await update.message.reply_text(
-            f"ℹ️ Tidak ada user yang cocok dengan '<code>{keyword}</code>'.",
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(f"ℹ️ Tidak ada user yang cocok dengan '<code>{keyword}</code>'.",
+                                       parse_mode=ParseMode.HTML)
         return
 
     lines = [f"🔍 <b>HASIL PENCARIAN: '{keyword}' ({len(matched)} ditemukan)</b>\n━━━━━━━━━━━━━━━━━━━━━"]
 
-    for i, user in enumerate(matched[:20], 1):
+    for i, user in enumerate(matched[:20], 1):  # Max 20
         status = user.status_emoji
         name = user.name or user.email.split("@")[0]
         lines.append(
@@ -442,7 +541,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_aktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /aktifkan — aktifkan user whitelist."""
+    """Handler untuk /aktifkan - aktifkan user whitelist."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -460,14 +562,15 @@ async def cmd_aktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text(
-            f"❌ Gagal mengaktifkan user <code>{email}</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(f"❌ Gagal mengaktifkan user <code>{email}</code>.",
+                                       parse_mode=ParseMode.HTML)
 
 
 async def cmd_nonaktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /nonaktifkan — nonaktifkan user whitelist."""
+    """Handler untuk /nonaktifkan - nonaktifkan user whitelist."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -485,10 +588,8 @@ async def cmd_nonaktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text(
-            f"❌ Gagal menonaktifkan user <code>{email}</code>.",
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(f"❌ Gagal menonaktifkan user <code>{email}</code>.",
+                                       parse_mode=ParseMode.HTML)
 
 
 # ============================================================
@@ -496,7 +597,10 @@ async def cmd_nonaktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /saldo — cek saldo akun real by user_id."""
+    """Handler untuk /saldo - cek saldo akun real by user_id."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -517,6 +621,7 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Kirim pesan loading
     loading_msg = await update.message.reply_text("⏳ Mengambil data saldo...")
 
     try:
@@ -551,7 +656,10 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /saldobyemail — cek saldo by email."""
+    """Handler untuk /saldobyemail - cek saldo by email."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -606,13 +714,18 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_depositlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /depositlog — lihat log deposit 24 jam terakhir."""
+    """Handler untuk /depositlog - lihat log deposit 24 jam terakhir."""
+    if not await check_admin(update):
+        return
+
     loading_msg = await update.message.reply_text("⏳ Mengambil log deposit...")
 
     deposits = await db.get_recent_deposits(hours=24)
 
     if not deposits:
-        await loading_msg.edit_text("ℹ️ Tidak ada deposit yang terdeteksi dalam 24 jam terakhir.")
+        await loading_msg.edit_text(
+            "ℹ️ Tidak ada deposit yang terdeteksi dalam 24 jam terakhir.",
+        )
         return
 
     lines = [f"💰 <b>LOG DEPOSIT 24 JAM ({len(deposits)} transaksi)</b>\n━━━━━━━━━━━━━━━━━━━━━"]
@@ -633,19 +746,26 @@ async def cmd_depositlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /depositlog7 — lihat log deposit 7 hari terakhir."""
-    loading_msg = await update.message.reply_text("⏳ Mengambil log deposit...")
-
-    deposits = await db.get_recent_deposits(hours=168)
-
-    if not deposits:
-        await loading_msg.edit_text("ℹ️ Tidak ada deposit yang terdeteksi dalam 7 hari terakhir.")
+    """Handler untuk /depositlog7 - lihat log deposit 7 hari terakhir."""
+    if not await check_admin(update):
         return
 
+    loading_msg = await update.message.reply_text("⏳ Mengambil log deposit...")
+
+    deposits = await db.get_recent_deposits(hours=168)  # 7 hari
+
+    if not deposits:
+        await loading_msg.edit_text(
+            "ℹ️ Tidak ada deposit yang terdeteksi dalam 7 hari terakhir.",
+        )
+        return
+
+    # Group by date
     from collections import defaultdict
     by_date = defaultdict(list)
     for dep in deposits:
-        by_date[dep.detected_at.strftime("%Y-%m-%d")].append(dep)
+        date_key = dep.detected_at.strftime("%Y-%m-%d")
+        by_date[date_key].append(dep)
 
     lines = [f"💰 <b>LOG DEPOSIT 7 HARI ({len(deposits)} transaksi)</b>\n━━━━━━━━━━━━━━━━━━━━━"]
 
@@ -659,8 +779,10 @@ async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n📅 <b>{date_key}</b> — {len(day_deps)} transaksi, total {unit} {total_amount:,.2f}"
         )
 
-        for dep in day_deps[:5]:
-            lines.append(f"   • <code>{dep.email}</code>: {dep.amount_formatted}")
+        for dep in day_deps[:5]:  # Max 5 per hari
+            lines.append(
+                f"   • <code>{dep.email}</code>: {dep.amount_formatted}"
+            )
         if len(day_deps) > 5:
             lines.append(f"   ... dan {len(day_deps) - 5} lainnya")
 
@@ -673,7 +795,10 @@ async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /stats — statistik user."""
+    """Handler untuk /stats - statistik user."""
+    if not await check_admin(update):
+        return
+
     loading_msg = await update.message.reply_text("⏳ Mengambil statistik...")
 
     stats = await db.get_user_statistics()
@@ -702,7 +827,10 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_cekstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /cekstatus — cek status lengkap user."""
+    """Handler untuk /cekstatus - cek status lengkap user."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -736,12 +864,14 @@ async def cmd_cekstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     whitelist = await db.get_whitelist_user(session.email)
 
+    # Ambil deposit history untuk user ini
     recent_deposits = await db.get_recent_deposits(hours=168)
     user_deposits = [d for d in recent_deposits if d.user_id == user_id]
     total_deposited = sum(d.amount for d in user_deposits)
 
     text = format_user_detail(user_id, session.email, balance, profile, whitelist)
 
+    # Tambahkan info deposit
     deposit_text = (
         f"\n📥 <b>DEPOSIT TERBARU (7 hari)</b>\n"
         f"   Jumlah transaksi: <code>{len(user_deposits)}</code>\n"
@@ -760,11 +890,134 @@ async def cmd_cekstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# ALL SALDO
+# ============================================================
+
+async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler untuk /allsaldo - fetch dan tampilkan SEMUA saldo user aktif.
+    Menampilkan seluruh hasil yang berhasil diambil, tanpa limit.
+    """
+    if not await check_admin(update):
+        return
+
+    loading_msg = await update.message.reply_text("⏳ Mengambil daftar session aktif...")
+
+    # Ambil SEMUA session aktif
+    sessions = await db.list_sessions(active_only=True, limit=1000)
+    total_sessions = len(sessions)
+
+    if not sessions:
+        await loading_msg.edit_text("ℹ️ Tidak ada session aktif yang ditemukan.")
+        return
+
+    await loading_msg.edit_text(
+        f"⏳ Fetching saldo <b>{total_sessions}</b> user...\n"
+        f"Harap tunggu...",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Fetch semua balance concurrent — semaphore 5 biar tidak kena rate limit
+    semaphore = asyncio.Semaphore(5)
+    fetched: list = []   # list of (email, user_id, UserBalance)
+    failed_count = 0
+
+    async def fetch_one(session):
+        nonlocal failed_count
+        async with semaphore:
+            try:
+                balance = await StockityAPI.get_user_balance_by_session(session)
+                fetched.append((session.email, session.user_id, balance))
+            except Exception:
+                failed_count += 1
+
+    await asyncio.gather(*[fetch_one(s) for s in sessions], return_exceptions=True)
+
+    if not fetched:
+        await loading_msg.edit_text(
+            f"❌ Tidak ada saldo yang berhasil diambil dari {total_sessions} session aktif.\n"
+            f"Kemungkinan semua token expired."
+        )
+        return
+
+    # Sort: real balance tertinggi dulu
+    fetched.sort(key=lambda x: x[2].real_balance, reverse=True)
+
+    total_real   = sum(r[2].real_balance for r in fetched)
+    bal_max      = fetched[0][2]
+    bal_min      = fetched[-1][2]
+
+    # ── Build baris per user (tanpa masking, tanpa limit) ──
+    rows = []
+    for i, (email, user_id, balance) in enumerate(fetched, 1):
+        rows.append(
+            f"{i}. <code>{email}</code>\n"
+            f"   💵 Real: <b>{balance.real_balance_formatted}</b>  "
+            f"| 🎮 Demo: {balance.demo_balance_formatted}"
+        )
+
+    header = (
+        f"💰 <b>ALL SALDO — {len(fetched)}/{total_sessions} berhasil</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    footer = (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>RINGKASAN</b>\n"
+        f"   ✅ Berhasil : <code>{len(fetched)}</code>  "
+        f"❌ Gagal : <code>{failed_count}</code>\n"
+        f"   💰 Total Real : <code>{bal_max.display_currency} {total_real:,.2f}</code>\n"
+        f"   🔺 Tertinggi  : <code>{bal_max.real_balance_formatted}</code>\n"
+        f"   🔻 Terendah   : <code>{bal_min.real_balance_formatted}</code>\n"
+        f"   🕐 {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    LIMIT = 3800  # sedikit di bawah batas Telegram 4096
+
+    # Coba kirim 1 pesan saja kalau muat
+    full = header + "\n".join(rows) + footer
+    if len(full) <= LIMIT:
+        await loading_msg.edit_text(full, parse_mode=ParseMode.HTML)
+        return
+
+    # Terlalu panjang — hapus loading lalu kirim bertahap
+    try:
+        await loading_msg.delete()
+    except Exception:
+        pass
+
+    # Pecah rows ke dalam chunk-chunk
+    chunks: list[str] = []
+    current = header
+    for row in rows:
+        candidate = current + row + "\n"
+        if len(candidate) > LIMIT:
+            chunks.append(current.rstrip())
+            current = row + "\n"
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    total_pages = len(chunks)
+    for idx, chunk in enumerate(chunks, 1):
+        prefix = f"📋 <b>Halaman {idx}/{total_pages}</b>\n" if total_pages > 1 else ""
+        await update.message.reply_text(prefix + chunk, parse_mode=ParseMode.HTML)
+
+    # Footer selalu di pesan terakhir
+    await update.message.reply_text(footer, parse_mode=ParseMode.HTML)
+
+
+# ============================================================
 # BROADCAST
 # ============================================================
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /broadcast — kirim pesan ke semua admin."""
+    """Handler untuk /broadcast - kirim pesan ke semua admin."""
+    if not await check_admin(update):
+        return
+
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -777,29 +1030,27 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = " ".join(args)
     sender = update.effective_user
-    sender_name = (
-        f"{sender.first_name or ''} {sender.last_name or ''}".strip()
-        or f"User {sender.id}"
-    )
+    sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip() or f"Admin {sender.id}"
 
+    # Format pesan
     broadcast_text = (
-        f"📢 <b>BROADCAST</b>\n"
+        f"📢 <b>BROADCAST DARI ADMIN</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Dari: <b>{sender_name}</b>\n"
-        f"🆔 Chat ID: <code>{sender.id}</code>\n"
         f"🕐 Waktu: <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{message}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
 
+    # Kirim ke semua admin
     admins = await db.list_bot_admins()
     sent = 0
     failed = 0
 
     for admin in admins:
         if admin.chat_id == sender.id:
-            continue
+            continue  # Skip sender
         try:
             await context.bot.send_message(
                 chat_id=admin.chat_id,
@@ -819,283 +1070,6 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# ALL SALDO — statistik saldo real semua user
-# ============================================================
-
-async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /allsaldo — Ambil & rangkum saldo akun real seluruh user.
-
-    Alur per user:
-      1. Gunakan stockity_token yang tersimpan di session (fast path).
-      2. Jika token expired → re-login menggunakan email + PK (password),
-         lalu fetch ulang balance dengan token baru.
-      3. Jika re-login pun gagal → catat sebagai 'gagal'.
-
-    Proses berjalan concurrent (maks 5 paralel) dengan progress update
-    setiap 5 user agar tidak trigger Telegram rate-limit.
-    """
-    loading_msg = await update.message.reply_text(
-        "⏳ <b>Mengambil saldo semua user...</b>\n"
-        "Proses ini memakan waktu beberapa menit — harap tunggu.",
-        parse_mode=ParseMode.HTML,
-    )
-
-    sessions = await db.list_sessions(active_only=True, limit=500)
-    if not sessions:
-        await loading_msg.edit_text("ℹ️ Tidak ada session aktif yang ditemukan.")
-        return
-
-    total = len(sessions)
-    results: list[tuple[str, float, str, bool]] = []  # (email, real_bal, currency, ok)
-
-    # Semaphore: maks 5 request concurrent agar tidak overload Stockity
-    sem = asyncio.Semaphore(5)
-
-    async def fetch_one(session) -> tuple[str, float, str, bool]:
-        """Fetch balance satu user — token lama dulu, lalu re-login jika perlu."""
-        async with sem:
-            # ── Strategy 1: gunakan token yang tersimpan ─────────────────────
-            try:
-                bal = await StockityAPI.get_user_balance_by_session(session)
-                return (session.email, bal.real_balance, bal.currency, True)
-            except StockityAPIError:
-                pass
-
-            # ── Strategy 2: re-login dengan email + PK ────────────────────────
-            if session.password:
-                try:
-                    new_token = await StockityAPI.login(
-                        session.email, session.password, session.device_id
-                    )
-                    if new_token:
-                        from models import UserSession as _US
-                        refreshed = _US(
-                            user_id=session.user_id,
-                            email=session.email,
-                            password=session.password,
-                            stockity_token=new_token,
-                            device_id=session.device_id,
-                            device_type=session.device_type,
-                            user_agent=session.user_agent,
-                            user_timezone=session.user_timezone,
-                            currency=session.currency,
-                            currency_iso=session.currency_iso,
-                        )
-                        bal = await StockityAPI.get_user_balance_by_session(refreshed)
-                        return (session.email, bal.real_balance, bal.currency, True)
-                except Exception:
-                    pass
-
-            return (session.email, 0.0, session.currency, False)
-
-    # Proses berurutan dalam batch kecil supaya ada progress update
-    CHUNK = 5
-    last_edit = datetime.utcnow()
-
-    for i in range(0, total, CHUNK):
-        chunk = sessions[i : i + CHUNK]
-        chunk_results = await asyncio.gather(*[fetch_one(s) for s in chunk])
-        results.extend(chunk_results)
-
-        done = min(i + CHUNK, total)
-        # Update progress kalau belum selesai dan sudah > 5 detik sejak edit terakhir
-        elapsed = (datetime.utcnow() - last_edit).total_seconds()
-        if done < total and elapsed >= 5:
-            try:
-                await loading_msg.edit_text(
-                    f"⏳ Mengambil saldo... <code>{done}/{total}</code>\n"
-                    f"Harap tunggu...",
-                    parse_mode=ParseMode.HTML,
-                )
-                last_edit = datetime.utcnow()
-            except Exception:
-                pass
-
-    # ── Agregasi hasil ─────────────────────────────────────────────────────────
-    ok_results    = [(e, b, c) for e, b, c, ok in results if ok]
-    failed_count  = len(results) - len(ok_results)
-
-    # Total per mata uang
-    by_currency: dict[str, float] = defaultdict(float)
-    for _, bal, curr in ok_results:
-        by_currency[curr] += bal
-
-    # Urut: tertinggi dulu
-    sorted_results = sorted(ok_results, key=lambda x: x[1], reverse=True)
-
-    # ── Format output ──────────────────────────────────────────────────────────
-    def mask(email: str) -> str:
-        """Mask email untuk tampilan agregat."""
-        if "@" in email:
-            local, domain = email.split("@", 1)
-            return local[:3] + "***@" + domain
-        return email[:5] + "***"
-
-    lines: list[str] = [
-        f"💰 <b>STATISTIK SALDO REAL — SEMUA USER</b>",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-        f"👥 Total session aktif : <code>{total}</code>",
-        f"✅ Berhasil diambil    : <code>{len(ok_results)}</code>",
-        f"❌ Gagal (token/login) : <code>{failed_count}</code>",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-        f"💵 <b>TOTAL SALDO REAL (per mata uang):</b>",
-    ]
-
-    if by_currency:
-        for curr, total_bal in sorted(by_currency.items(), key=lambda x: x[1], reverse=True):
-            unit = ISO_TO_UNIT.get(curr, curr)
-            lines.append(f"   {curr}: <code>{unit} {total_bal:,.2f}</code>")
-    else:
-        lines.append("   (tidak ada data)")
-
-    lines.append(f"\n📊 <b>TOP 10 SALDO TERTINGGI:</b>")
-    if sorted_results:
-        for rank, (email, bal, curr) in enumerate(sorted_results[:10], 1):
-            unit = ISO_TO_UNIT.get(curr, curr)
-            lines.append(
-                f"   {rank}. <code>{mask(email)}</code>\n"
-                f"       💵 <b>{unit} {bal:,.2f}</b> ({curr})"
-            )
-    else:
-        lines.append("   (tidak ada data)")
-
-    # Saldo terendah (non-nol) untuk gambaran
-    nonzero = [(e, b, c) for e, b, c in sorted_results if b > 0]
-    if len(nonzero) > 3:
-        lines.append(f"\n📉 <b>SALDO TERENDAH (berisi):</b>")
-        for email, bal, curr in nonzero[-3:]:
-            unit = ISO_TO_UNIT.get(curr, curr)
-            lines.append(
-                f"   • <code>{mask(email)}</code>: {unit} {bal:,.2f}"
-            )
-
-    lines += [
-        f"\n━━━━━━━━━━━━━━━━━━━━━",
-        f"🕐 <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-
-# ============================================================
-# STATS DEPOSIT — statistik deposit agregat semua user
-# ============================================================
-
-async def cmd_statsdeposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /statsdeposit — Statistik deposit semua user dari deposit_events.
-
-    Menampilkan:
-    - Ringkasan per periode (24h / 7d / 30d): jumlah transaksi, user unik, total nilai
-    - Top 10 depositor 30 hari terakhir
-    - Rata-rata deposit per transaksi
-    """
-    loading_msg = await update.message.reply_text("⏳ Mengambil statistik deposit...")
-
-    # Ambil data dari tiga periode sekaligus
-    deps_24h, deps_7d, deps_30d = await asyncio.gather(
-        db.get_recent_deposits(hours=24),
-        db.get_recent_deposits(hours=168),
-        db.get_recent_deposits(hours=720),
-    )
-
-    if not deps_30d:
-        await loading_msg.edit_text(
-            "ℹ️ Belum ada deposit yang terdeteksi dalam 30 hari terakhir.\n"
-            "Pastikan background deposit-detection loop sudah berjalan."
-        )
-        return
-
-    # ── Helper: aggregate per mata uang ───────────────────────────────────────
-    def sum_by_currency(deps) -> dict[str, float]:
-        acc: dict[str, float] = defaultdict(float)
-        for d in deps:
-            acc[d.currency] += d.amount
-        return dict(acc)
-
-    def format_currency_block(by_curr: dict[str, float]) -> str:
-        if not by_curr:
-            return "   —"
-        lines = []
-        for curr, total in sorted(by_curr.items(), key=lambda x: x[1], reverse=True):
-            unit = ISO_TO_UNIT.get(curr, curr)
-            lines.append(f"   {curr}: <code>{unit} {total:,.2f}</code>")
-        return "\n".join(lines)
-
-    # ── Per-user stats (periode 30 hari) ──────────────────────────────────────
-    user_stats: dict[str, dict] = {}
-    for dep in deps_30d:
-        uid = dep.user_id
-        if uid not in user_stats:
-            user_stats[uid] = {
-                "email": dep.email,
-                "count": 0,
-                "total": 0.0,
-                "currency": dep.currency,
-            }
-        user_stats[uid]["count"] += 1
-        user_stats[uid]["total"] += dep.amount
-
-    unique_30d = len(user_stats)
-    unique_7d  = len({d.user_id for d in deps_7d})
-    unique_24h = len({d.user_id for d in deps_24h})
-
-    # Top 10 berdasarkan total nilai
-    top10 = sorted(user_stats.values(), key=lambda x: x["total"], reverse=True)[:10]
-
-    # Rata-rata per transaksi (30d)
-    avg_30d = (sum(d.amount for d in deps_30d) / len(deps_30d)) if deps_30d else 0.0
-    # Gunakan currency terbanyak untuk rata-rata
-    most_common_curr = max(sum_by_currency(deps_30d), key=sum_by_currency(deps_30d).get) if deps_30d else "IDR"
-    avg_unit = ISO_TO_UNIT.get(most_common_curr, most_common_curr)
-
-    def mask(email: str) -> str:
-        if "@" in email:
-            local, domain = email.split("@", 1)
-            return local[:3] + "***@" + domain
-        return email[:5] + "***"
-
-    # ── Format output ──────────────────────────────────────────────────────────
-    lines: list[str] = [
-        f"📊 <b>STATISTIK DEPOSIT — SEMUA USER</b>",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-        f"",
-        f"<b>📅 24 JAM TERAKHIR</b>",
-        f"   Transaksi : <code>{len(deps_24h)}</code>  |  User unik: <code>{unique_24h}</code>",
-        format_currency_block(sum_by_currency(deps_24h)),
-        f"",
-        f"<b>📅 7 HARI TERAKHIR</b>",
-        f"   Transaksi : <code>{len(deps_7d)}</code>  |  User unik: <code>{unique_7d}</code>",
-        format_currency_block(sum_by_currency(deps_7d)),
-        f"",
-        f"<b>📅 30 HARI TERAKHIR</b>",
-        f"   Transaksi : <code>{len(deps_30d)}</code>  |  User unik: <code>{unique_30d}</code>",
-        f"   Rata-rata / tx: <code>{avg_unit} {avg_30d:,.2f}</code>",
-        format_currency_block(sum_by_currency(deps_30d)),
-        f"",
-        f"<b>🏆 TOP 10 DEPOSITOR (30 hari):</b>",
-    ]
-
-    for rank, u in enumerate(top10, 1):
-        unit = ISO_TO_UNIT.get(u["currency"], u["currency"])
-        lines.append(
-            f"   {rank}. <code>{mask(u['email'])}</code>\n"
-            f"       {u['count']} tx | <b>{unit} {u['total']:,.2f}</b>"
-        )
-
-    lines += [
-        f"",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-        f"🕐 <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>",
-        f"━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-
-# ============================================================
 # CALLBACK QUERY HANDLER
 # ============================================================
 
@@ -1105,6 +1079,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     data = query.data
+    chat_id = update.effective_user.id
+
+    # Verify admin
+    if not await db.is_bot_admin(chat_id):
+        await query.edit_message_text("⛔ Akses ditolak.")
+        return
 
     if data.startswith("activate:"):
         email = data.split(":", 1)[1]
@@ -1137,7 +1117,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.effective_message.reply_text(
                 "❌ <b>Terjadi kesalahan</b>\n"
-                "Silakan coba lagi nanti.",
+                "Silakan coba lagi nanti atau hubungi super admin.",
                 parse_mode=ParseMode.HTML,
             )
         except Exception:

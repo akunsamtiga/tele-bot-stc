@@ -163,6 +163,8 @@ class DepositEvent:
     previous_balance: float
     new_balance: float
     detected_at: datetime = field(default_factory=datetime.utcnow)
+    transaction_id: Optional[str] = None
+    handler_name: Optional[str] = None
 
     @property
     def amount_formatted(self) -> str:

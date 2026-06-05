@@ -13,8 +13,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from config import (
-    NOTIFICATION_CHANNEL_ID, DEPOSIT_CHECK_INTERVAL,
-    MIN_DEPOSIT_AMOUNT, logger
+    NOTIFICATION_CHANNEL_ID, DEPOSIT_CHECK_INTERVAL, logger
 )
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
@@ -81,108 +80,123 @@ class NotificationService:
         logger.info("NotificationService stopped")
 
     # ============================================================
-    # DEPOSIT DETECTION (Polling)
+    # DEPOSIT DETECTION (Transaction ID Tracking)
     # ============================================================
 
     async def _deposit_detection_loop(self):
         """
-        Loop untuk mendeteksi deposit dengan membandingkan balance.
+        Loop untuk mendeteksi deposit baru menggunakan endpoint transactions.
+        Lebih reliable daripada balance comparison karena:
+        - Berbasis transaction_id unik, bukan selisih saldo
+        - Tidak terkena noise dari profit/loss trading
         Interval: DEPOSIT_CHECK_INTERVAL detik (default 5 menit).
         """
         logger.info(
-            "Deposit detection loop started (interval=%ds, min_amount=%s)",
-            DEPOSIT_CHECK_INTERVAL, MIN_DEPOSIT_AMOUNT
+            "Deposit detection loop started (interval=%ds, via transactions endpoint)",
+            DEPOSIT_CHECK_INTERVAL,
         )
 
-        # Tunggu sebentar saat startup
+        # Pre-populate seen transaction IDs dari DB (30 hari terakhir)
+        # agar tidak re-notify saat bot restart
+        self._seen_txn_ids: set = set()
+        try:
+            existing = await db.get_recent_deposits(hours=720)  # 30 hari
+            for dep in existing:
+                if getattr(dep, "transaction_id", None):
+                    self._seen_txn_ids.add(dep.transaction_id)
+            logger.info(
+                "Pre-populated %d known transaction IDs from DB",
+                len(self._seen_txn_ids),
+            )
+        except Exception as e:
+            logger.warning("Could not pre-populate txn IDs: %s", e)
+
+        # Tunggu sebentar saat startup agar service lain siap
         await asyncio.sleep(30)
 
         while self._running:
             try:
-                await self._check_all_balances()
+                await self._check_all_deposits()
             except Exception as e:
                 logger.error("Error in deposit detection loop: %s", e)
 
-            # Sleep dengan cancellable interval
             for _ in range(DEPOSIT_CHECK_INTERVAL):
                 if not self._running:
                     break
                 await asyncio.sleep(1)
 
-    async def _check_all_balances(self):
-        """Cek balance semua user aktif dan deteksi perubahan (deposit)."""
+    async def _check_all_deposits(self):
+        """Cek deposit baru untuk semua user aktif via transactions endpoint."""
         sessions = await db.list_sessions(active_only=True, limit=500)
-        logger.debug("Checking balances for %d active sessions", len(sessions))
+        logger.debug("Checking deposits for %d active sessions", len(sessions))
 
         for session in sessions:
             try:
-                await self._check_single_balance(session)
+                await self._check_single_deposit(session)
             except Exception as e:
                 logger.warning(
-                    "Failed to check balance for %s: %s",
-                    session.user_id, e
+                    "Failed to check deposits for %s: %s", session.user_id, e
                 )
-            # Small delay antara user untuk tidak overload
             await asyncio.sleep(0.5)
 
-    async def _check_single_balance(self, session):
-        """Cek balance single user dan deteksi deposit."""
-        # Skip user yang tidak punya PK tersimpan — token tidak bisa di-refresh
-        # kalau expired, cek balance akan terus gagal tanpa hasil berguna.
-        if not session.password:
-            logger.debug("Skip balance check %s: tidak ada PK", session.user_id)
-            return
-        # Ambil balance terakhir dari database
-        last_balance_record = await db.get_last_balance(session.user_id)
-
-        # Ambil balance terkini dari Stockity API
+    async def _check_single_deposit(self, session):
+        """
+        Cek deposit baru untuk satu user.
+        Mengambil transactions endpoint lalu filter by transaction_id yang belum pernah dilihat.
+        Hanya proses transaksi dalam 7 hari terakhir untuk menghindari spam saat restart.
+        """
         try:
-            current_balance = await StockityAPI.get_user_balance_by_session(session)
+            transactions = await StockityAPI.get_deposit_transactions_by_session(session)
         except StockityAPIError:
-            # Session mungkin expired, skip
             return
 
-        # Jika belum ada record sebelumnya, simpan sebagai baseline
-        if not last_balance_record:
-            await db.save_balance_snapshot(
-                user_id=session.user_id,
-                email=session.email,
-                real_balance=current_balance.real_balance,
-                demo_balance=current_balance.demo_balance,
-                currency=current_balance.currency,
+        # Hanya proses transaksi yang dibuat dalam 7 hari terakhir
+        cutoff_ts = (datetime.utcnow() - timedelta(days=7)).timestamp()
+
+        for txn in transactions:
+            txn_id = txn.get("transaction_id", "")
+            if not txn_id:
+                continue
+
+            # Skip kalau sudah pernah diproses
+            if txn_id in self._seen_txn_ids:
+                continue
+
+            # Mark as seen sekarang (sebelum proses) agar tidak double-notify
+            self._seen_txn_ids.add(txn_id)
+
+            # Skip kalau transaksi terlalu lama
+            created_ts = txn.get("created_at", 0) or txn.get("processed_at", 0)
+            if created_ts and created_ts < cutoff_ts:
+                continue
+
+            # Deposit baru ditemukan!
+            amount    = txn.get("amount", 0)
+            currency  = txn.get("currency", session.currency or "IDR")
+            detected  = (
+                datetime.utcfromtimestamp(created_ts)
+                if created_ts else datetime.utcnow()
             )
-            return
 
-        # Hitung perubahan balance real
-        previous_real = float(last_balance_record.get("real_balance", 0))
-        current_real = current_balance.real_balance
-        diff = current_real - previous_real
-
-        # Simpan snapshot terbaru
-        await db.save_balance_snapshot(
-            user_id=session.user_id,
-            email=session.email,
-            real_balance=current_balance.real_balance,
-            demo_balance=current_balance.demo_balance,
-            currency=current_balance.currency,
-        )
-
-        # Deteksi deposit: balance naik lebih dari threshold
-        if diff >= MIN_DEPOSIT_AMOUNT:
             event = DepositEvent(
                 user_id=session.user_id,
                 email=session.email,
-                amount=diff,
-                currency=current_balance.currency,
-                previous_balance=previous_real,
-                new_balance=current_real,
-                detected_at=datetime.utcnow(),
+                amount=amount,
+                currency=currency,
+                previous_balance=0,
+                new_balance=0,
+                detected_at=detected,
+                transaction_id=txn_id,
+                handler_name=txn.get("handler_name", ""),
             )
 
-            # Simpan ke database
-            await db.save_deposit_event(event)
+            # Simpan ke DB
+            try:
+                await db.save_deposit_event(event)
+            except Exception as e:
+                logger.warning("save_deposit_event error: %s", e)
 
-            # Trigger callbacks
+            # Trigger callbacks (→ send Telegram notification)
             for callback in self._deposit_callbacks:
                 try:
                     await callback(event)
@@ -300,14 +314,17 @@ class NotificationService:
 
     async def send_deposit_notification(self, event: DepositEvent):
         """Kirim notifikasi deposit ke semua admin."""
+        txn_line     = f"\n🔑 <b>Txn ID:</b> <code>{event.transaction_id}</code>" if event.transaction_id else ""
+        handler_line = f"\n💳 <b>Via:</b> {event.handler_name}" if event.handler_name else ""
+
         message = (
             f"💰 <b>DEPOSIT TERDETEKSI</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>User:</b> <code>{event.email}</code>\n"
             f"🆔 <b>ID:</b> <code>{event.user_id}</code>\n"
-            f"💵 <b>Jumlah:</b> <code>{event.amount_formatted}</code>\n"
-            f"📊 <b>Balance Sebelum:</b> <code>{event.previous_balance:,.2f}</code>\n"
-            f"📊 <b>Balance Sesudah:</b> <code>{event.new_balance:,.2f}</code>\n"
+            f"💵 <b>Jumlah:</b> <code>{event.amount_formatted}</code>"
+            f"{txn_line}"
+            f"{handler_line}\n"
             f"🕐 <b>Waktu:</b> {event.detected_at.strftime('%d %b %Y %H:%M:%S')} UTC\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )

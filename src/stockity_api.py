@@ -6,37 +6,11 @@ Menggunakan curl binary untuk bypass Cloudflare (sama dengan backend).
 
 import asyncio
 import json
-import os
-import shutil
 import subprocess
 from typing import Optional, Dict, Any, List
 
 from config import STOCKITY_API_URL, DEFAULT_USER_AGENT, DEFAULT_TIMEZONE, logger
 from models import UserBalance, UserProfile
-
-
-# ============================================================
-# CURL PATH RESOLUTION
-# Systemd service bisa membatasi PATH hanya ke venv/bin,
-# sehingga "curl" biasa tidak ditemukan. Cari di lokasi umum.
-# ============================================================
-
-def _find_curl() -> str:
-    """Cari curl binary — fallback ke path absolut jika tidak ada di PATH."""
-    found = shutil.which("curl")
-    if found:
-        return found
-    for path in ("/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"):
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            logger.info("curl ditemukan di fallback path: %s", path)
-            return path
-    logger.warning(
-        "curl tidak ditemukan di PATH maupun lokasi umum! "
-        "Install dengan: sudo apt install curl"
-    )
-    return "curl"  # akan raise FileNotFoundError saat dipanggil
-
-_CURL_BIN: str = _find_curl()
 
 
 class StockityAPIError(Exception):
@@ -81,7 +55,8 @@ class StockityAPI:
             header_args.extend(["-H", f"{k}: {v}"])
 
         cmd = [
-            _CURL_BIN, "-s", "-X", "GET", url,
+            "curl", "-s", "-X", "GET", url,
+            "--compressed",           # auto-decompress gzip/br dari server
             *header_args,
             "-H", "Content-Type: application/json",
             "--max-time", str(timeout),
@@ -117,63 +92,7 @@ class StockityAPI:
         except asyncio.TimeoutError:
             raise StockityAPIError("Request timeout")
         except FileNotFoundError:
-            raise StockityAPIError(
-                f"curl binary tidak ditemukan di '{_CURL_BIN}'. "
-                "Install: sudo apt install curl"
-            )
-        except Exception as e:
-            raise StockityAPIError(f"Request error: {str(e)}")
-
-    @staticmethod
-    async def _curl_post(
-        url: str, body: dict, headers: Dict[str, str], timeout: int = 15
-    ) -> Dict[str, Any]:
-        """HTTP POST menggunakan curl binary (bypass Cloudflare). Digunakan untuk login."""
-        header_args = []
-        for k, v in headers.items():
-            header_args.extend(["-H", f"{k}: {v}"])
-
-        cmd = [
-            _CURL_BIN, "-s", "-X", "POST", url,
-            *header_args,
-            "-H", "Content-Type: application/json",
-            "-d", json.dumps(body),
-            "--max-time", str(timeout),
-            "-w", "\n__HTTP_STATUS__%{http_code}",
-        ]
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
-            stdout_str = stdout.decode("utf-8", errors="replace")
-
-            parts = stdout_str.split("\n__HTTP_STATUS__")
-            status_code = int(parts[1].strip() if len(parts) > 1 else "0")
-            raw_body = parts[0].strip()
-
-            if not raw_body or status_code == 0:
-                raise StockityAPIError("Request timeout atau tidak ada response")
-
-            try:
-                parsed = json.loads(raw_body)
-            except json.JSONDecodeError:
-                raise StockityAPIError(f"Response bukan JSON (HTTP {status_code}): {raw_body[:300]}")
-
-            return {"status": status_code, "data": parsed}
-
-        except asyncio.TimeoutError:
-            raise StockityAPIError("Request timeout")
-        except FileNotFoundError:
-            raise StockityAPIError(
-                f"curl binary tidak ditemukan di '{_CURL_BIN}'. "
-                "Install: sudo apt install curl"
-            )
-        except StockityAPIError:
-            raise
+            raise StockityAPIError("curl binary tidak ditemukan. Install curl: sudo apt install curl")
         except Exception as e:
             raise StockityAPIError(f"Request error: {str(e)}")
 
@@ -327,59 +246,6 @@ class StockityAPI:
         )
 
     @classmethod
-    async def login(
-        cls, email: str, password: str, device_id: str
-    ) -> Optional[str]:
-        """
-        Login ke Stockity API menggunakan email + password (PK dari sessions).
-        Digunakan untuk me-refresh token yang expired saat fetch balance gagal.
-
-        Endpoint: POST /passport/v2/sign_in?locale=id
-        Response:  { data: { authtoken: str, user_id: str } }
-
-        Returns auth token baru jika berhasil, None jika gagal.
-        """
-        url = f"{cls.BASE_URL}/passport/v2/sign_in?locale=id"
-        headers = {
-            "device-id":     device_id,
-            "device-type":   "web",
-            "user-timezone": DEFAULT_TIMEZONE,
-            "accept":        "application/json, text/plain, */*",
-            "User-Agent":    DEFAULT_USER_AGENT,
-            "Origin":        "https://stockity.id",
-            "Referer":       "https://stockity.id/",
-        }
-
-        try:
-            resp = await cls._curl_post(
-                url, {"email": email, "password": password}, headers, timeout=15
-            )
-            status = resp["status"]
-
-            if status == 429:
-                logger.warning(f"[Login] Rate limited (429) untuk {email}")
-                return None
-
-            if status >= 400:
-                logger.warning(f"[Login] Gagal untuk {email}: HTTP {status}")
-                return None
-
-            token: Optional[str] = resp["data"].get("data", {}).get("authtoken")
-            if not token:
-                logger.warning(f"[Login] authtoken tidak ada di response untuk {email}")
-                return None
-
-            logger.info(f"[Login] Berhasil refresh token untuk {email}")
-            return token
-
-        except StockityAPIError as e:
-            logger.warning(f"[Login] StockityAPIError untuk {email}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"[Login] Error untuk {email}: {e}")
-            return None
-
-    @classmethod
     async def get_user_balance_by_session(
         cls, session
     ) -> UserBalance:
@@ -401,6 +267,72 @@ class StockityAPI:
         Convenience method: ambil profile menggunakan session object.
         """
         return await cls.get_profile(
+            auth_token=session.stockity_token,
+            device_id=session.device_id,
+            timezone=session.user_timezone,
+        )
+
+    @classmethod
+    async def get_deposit_transactions(
+        cls,
+        auth_token: str,
+        device_id: str,
+        timezone: str = DEFAULT_TIMEZONE,
+        per: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Ambil daftar transaksi deposit sukses dari Stockity API.
+        Endpoint: GET /platform/private/transactions?type=deposit&status=success&repeatable=true
+        Dari HAR: response { success, data: { items: [...] } }
+        Setiap item punya: transaction_id, amount, currency_iso, created_at, processed_at, handler_name
+        """
+        url = (
+            f"{cls.BASE_URL}/platform/private/transactions"
+            f"?type=deposit&status=success&repeatable=true&per={per}&locale=id"
+        )
+        headers = cls._build_headers(auth_token, device_id, timezone)
+
+        try:
+            resp = await cls._curl_get(url, headers, timeout=15)
+            api_data = resp["data"]
+
+            # Navigasi structure: { success, data: { items: [...] } }
+            items: List[Dict] = []
+            if isinstance(api_data, dict):
+                inner = api_data.get("data", {})
+                if isinstance(inner, dict):
+                    items = inner.get("items", [])
+                elif isinstance(inner, list):
+                    items = inner
+            elif isinstance(api_data, list):
+                items = api_data
+
+            result = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                result.append({
+                    "transaction_id": item.get("transaction_id", ""),
+                    "amount":         float(item.get("amount", 0)),
+                    "currency":       item.get("currency_iso", "IDR"),
+                    "created_at":     item.get("created_at", 0),    # Unix timestamp
+                    "processed_at":   item.get("processed_at", 0),
+                    "handler":        item.get("handler", ""),
+                    "handler_name":   item.get("handler_name", ""),
+                    "status":         item.get("status", ""),
+                })
+            return result
+
+        except StockityAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"get_deposit_transactions error: {e}")
+            raise StockityAPIError(f"Gagal mengambil deposit transactions: {str(e)}")
+
+    @classmethod
+    async def get_deposit_transactions_by_session(cls, session) -> List[Dict[str, Any]]:
+        """Convenience: ambil deposit transactions dari session object."""
+        return await cls.get_deposit_transactions(
             auth_token=session.stockity_token,
             device_id=session.device_id,
             timezone=session.user_timezone,
