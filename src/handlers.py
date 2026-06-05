@@ -10,10 +10,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import logger
+from config import logger, SUPER_ADMIN_CHAT_IDS
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
-from models import UserBalance, UserProfile
+from models import UserBalance, UserProfile, BotAdmin
 
 # ============================================================
 # HELPERS

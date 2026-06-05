@@ -7,6 +7,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+# ============================================================
+# CURRENCY MAPPING (dipakai di seluruh modul)
+# ============================================================
+ISO_TO_UNIT: dict[str, str] = {
+    "IDR": "Rp", "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$",
+    "COP": "Col$", "MXN": "MX$", "ARS": "AR$", "PEN": "S/", "CLP": "CL$",
+    "NGN": "N", "KES": "KSh", "GHS": "GHc", "ZAR": "R",
+    "INR": "Rs", "PKR": "Rs", "BDT": "৳", "LKR": "Rs",
+    "PHP": "P", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
+    "TRY": "₺", "UAH": "₴", "KZT": "₸", "UZS": "so'm",
+    "RUB": "₽", "AMD": "֏", "AZN": "₼", "GEL": "₾",
+    "EGP": "E£", "MAD": "MAD", "TND": "DT", "DZD": "DA",
+    "SAR": "﷼", "AED": "AED", "KWD": "KD", "QAR": "QR", "OMR": "OMR",
+    "HKD": "HK$", "TWD": "NT$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$",
+    "VES": "Bs.S", "BOB": "Bs.", "PYG": "₲", "UYU": "$U", "GTQ": "Q",
+    "HNL": "L", "CRC": "₡", "DOP": "RD$", "CUP": "$", "NIO": "C$",
+}
+
 
 @dataclass
 class UserSession:
@@ -31,20 +49,6 @@ class UserSession:
     @property
     def display_currency(self) -> str:
         """Return simbol mata uang yang readable."""
-        ISO_TO_UNIT = {
-            "IDR": "Rp", "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$",
-            "COP": "Col$", "MXN": "MX$", "ARS": "AR$", "PEN": "S/", "CLP": "CL$",
-            "NGN": "N", "KES": "KSh", "GHS": "GHc", "ZAR": "R",
-            "INR": "Rs", "PKR": "Rs", "BDT": "৳", "LKR": "Rs",
-            "PHP": "P", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
-            "TRY": "₺", "UAH": "₴", "KZT": "₸", "UZS": "so'm",
-            "RUB": "₽", "AMD": "֏", "AZN": "₼", "GEL": "₾",
-            "EGP": "E£", "MAD": "MAD", "TND": "DT", "DZD": "DA",
-            "SAR": "﷼", "AED": "AED", "KWD": "KD", "QAR": "QR", "OMR": "OMR",
-            "HKD": "HK$", "TWD": "NT$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$",
-            "VES": "Bs.S", "BOB": "Bs.", "PYG": "₲", "UYU": "$U", "GTQ": "Q",
-            "HNL": "L", "CRC": "₡", "DOP": "RD$", "CUP": "$", "NIO": "C$",
-        }
         return ISO_TO_UNIT.get(self.currency, self.currency)
 
 
@@ -137,20 +141,6 @@ class UserBalance:
 
     @property
     def display_currency(self) -> str:
-        ISO_TO_UNIT = {
-            "IDR": "Rp", "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$",
-            "COP": "Col$", "MXN": "MX$", "ARS": "AR$", "PEN": "S/", "CLP": "CL$",
-            "NGN": "N", "KES": "KSh", "GHS": "GHc", "ZAR": "R",
-            "INR": "Rs", "PKR": "Rs", "BDT": "৳", "LKR": "Rs",
-            "PHP": "P", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
-            "TRY": "₺", "UAH": "₴", "KZT": "₸", "UZS": "so'm",
-            "RUB": "₽", "AMD": "֏", "AZN": "₼", "GEL": "₾",
-            "EGP": "E£", "MAD": "MAD", "TND": "DT", "DZD": "DA",
-            "SAR": "﷼", "AED": "AED", "KWD": "KD", "QAR": "QR", "OMR": "OMR",
-            "HKD": "HK$", "TWD": "NT$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$",
-            "VES": "Bs.S", "BOB": "Bs.", "PYG": "₲", "UYU": "$U", "GTQ": "Q",
-            "HNL": "L", "CRC": "₡", "DOP": "RD$", "CUP": "$", "NIO": "C$",
-        }
         return ISO_TO_UNIT.get(self.currency, self.currency)
 
     @property
@@ -176,20 +166,6 @@ class DepositEvent:
 
     @property
     def amount_formatted(self) -> str:
-        ISO_TO_UNIT = {
-            "IDR": "Rp", "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$",
-            "COP": "Col$", "MXN": "MX$", "ARS": "AR$", "PEN": "S/", "CLP": "CL$",
-            "NGN": "N", "KES": "KSh", "GHS": "GHc", "ZAR": "R",
-            "INR": "Rs", "PKR": "Rs", "BDT": "৳", "LKR": "Rs",
-            "PHP": "P", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
-            "TRY": "₺", "UAH": "₴", "KZT": "₸", "UZS": "so'm",
-            "RUB": "₽", "AMD": "֏", "AZN": "₼", "GEL": "₾",
-            "EGP": "E£", "MAD": "MAD", "TND": "DT", "DZD": "DA",
-            "SAR": "﷼", "AED": "AED", "KWD": "KD", "QAR": "QR", "OMR": "OMR",
-            "HKD": "HK$", "TWD": "NT$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$",
-            "VES": "Bs.S", "BOB": "Bs.", "PYG": "₲", "UYU": "$U", "GTQ": "Q",
-            "HNL": "L", "CRC": "₡", "DOP": "RD$", "CUP": "$", "NIO": "C$",
-        }
         unit = ISO_TO_UNIT.get(self.currency, self.currency)
         return f"{unit} {self.amount:,.2f}"
 

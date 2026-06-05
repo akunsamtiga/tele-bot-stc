@@ -53,7 +53,7 @@ BACKEND_API_URL: str = os.getenv("BACKEND_API_URL", "http://localhost:3000")
 # MODE OPERASI
 # ============================================================
 BOT_MODE: str = os.getenv("BOT_MODE", "polling")  # polling | webhook
-nWEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8443"))
 
 # ============================================================
