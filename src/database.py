@@ -47,12 +47,12 @@ class SupabaseDB:
                 lambda: self.client.table("bot_admins")
                 .select("*")
                 .eq("chat_id", chat_id)
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
-            if not result.data:
+            if not result or not result.data:
                 return None
-            d = result.data
+            d = result.data[0]
             return BotAdmin(
                 chat_id=d["chat_id"],
                 username=d.get("username"),
@@ -181,12 +181,12 @@ class SupabaseDB:
                 lambda: self.client.table("sessions")
                 .select("*")
                 .eq("user_id", user_id)
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
-            if not result.data:
+            if not result or not result.data:
                 return None
-            d = result.data
+            d = result.data[0]
             return UserSession(
                 user_id=d["user_id"],
                 email=d["email"],
@@ -212,12 +212,12 @@ class SupabaseDB:
                 lambda: self.client.table("sessions")
                 .select("*")
                 .eq("email", email.lower().strip())
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
-            if not result.data:
+            if not result or not result.data:
                 return None
-            d = result.data
+            d = result.data[0]
             return UserSession(
                 user_id=d["user_id"],
                 email=d["email"],
@@ -296,12 +296,12 @@ class SupabaseDB:
                 lambda: self.client.table("whitelist_users")
                 .select("*")
                 .eq("email", email.lower().strip())
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
-            if not result.data:
+            if not result or not result.data:
                 return None
-            d = result.data
+            d = result.data[0]
             return WhitelistUser(
                 id=d.get("id"),
                 email=d["email"],
@@ -326,21 +326,21 @@ class SupabaseDB:
                 lambda: self.client.table("whitelist_users")
                 .select("*")
                 .eq("user_id", user_id)
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
-            if not result.data:
+            if not result or not result.data:
                 # Coba by email
                 result = await asyncio.to_thread(
                     lambda: self.client.table("whitelist_users")
                     .select("*")
                     .eq("email", user_id.lower().strip())
-                    .maybe_single()
+                    .limit(1)
                     .execute()
                 )
-            if not result.data:
+            if not result or not result.data:
                 return None
-            d = result.data
+            d = result.data[0]
             return WhitelistUser(
                 id=d.get("id"),
                 email=d["email"],
@@ -474,10 +474,11 @@ class SupabaseDB:
                 .eq("user_id", user_id)
                 .order("checked_at", desc=True)
                 .limit(1)
-                .maybe_single()
                 .execute()
             )
-            return result.data
+            if not result or not result.data:
+                return None
+            return result.data[0]
         except Exception as e:
             logger.error(f"get_last_balance error: {e}")
             return None
@@ -525,6 +526,7 @@ class SupabaseDB:
                     previous_balance=d.get("previous_balance", 0),
                     new_balance=d.get("new_balance", 0),
                     detected_at=datetime.fromisoformat(d["detected_at"].replace("Z", "+00:00")),
+                    transaction_id=d.get("transaction_id"),
                 )
                 for d in (result.data or [])
             ]
@@ -543,6 +545,7 @@ class SupabaseDB:
                 "previous_balance": event.previous_balance,
                 "new_balance": event.new_balance,
                 "detected_at": event.detected_at.isoformat(),
+                "transaction_id": event.transaction_id,
             }
             await asyncio.to_thread(
                 lambda: self.client.table("deposit_events").insert(data).execute()
