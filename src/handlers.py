@@ -52,7 +52,6 @@ def format_user_detail(user_id: str, email: str, balance: UserBalance,
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>SALDO AKUN REAL</b>\n"
         f"   <b>Real:</b> <code>{balance.real_balance_formatted}</code>\n"
-        f"   <b>Demo:</b> <code>{balance.demo_balance_formatted}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏷️ <b>Status Whitelist:</b> {status}\n"
         f"🕐 <b>Login Terakhir:</b> {last_login}\n"
@@ -598,7 +597,6 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💱 <b>Mata Uang:</b> <code>{balance.currency}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"💵 <b>Saldo Real:</b> <code>{balance.real_balance_formatted}</code>\n"
-            f"🎮 <b>Saldo Demo:</b> <code>{balance.demo_balance_formatted}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🕐 Diperiksa: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
@@ -656,7 +654,6 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💱 <b>Mata Uang:</b> <code>{balance.currency}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"💵 <b>Saldo Real:</b> <code>{balance.real_balance_formatted}</code>\n"
-            f"🎮 <b>Saldo Demo:</b> <code>{balance.demo_balance_formatted}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🕐 Diperiksa: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
@@ -1043,8 +1040,7 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append(
             f"<b>{i}.</b> 📧 <code>{email}</code>\n"
             f"    🔑 PK : <code>{pk}</code>\n"
-            f"    💵 Real : <b>{balance.real_balance_formatted}</b>\n"
-            f"    🎮 Demo : {balance.demo_balance_formatted}"
+            f"    💵 Real : <b>{balance.real_balance_formatted}</b>"
         )
 
     header = (
