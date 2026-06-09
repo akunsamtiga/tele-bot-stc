@@ -55,7 +55,7 @@ WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8443"))
 # ============================================================
 # DEPOSIT DETECTION
 # ============================================================
-DEPOSIT_CHECK_INTERVAL: int = int(os.getenv("DEPOSIT_CHECK_INTERVAL", "300"))  # 5 menit
+DEPOSIT_CHECK_INTERVAL: int = int(os.getenv("DEPOSIT_CHECK_INTERVAL", "60"))  # 1 menit (realtime)
 MIN_DEPOSIT_AMOUNT: float = float(os.getenv("MIN_DEPOSIT_AMOUNT", "1"))
 
 # ============================================================

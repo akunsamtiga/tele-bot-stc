@@ -131,18 +131,29 @@ class NotificationService:
                 await asyncio.sleep(1)
 
     async def _check_all_deposits(self):
-        """Cek deposit baru untuk semua user aktif via transactions endpoint."""
-        sessions = await db.list_sessions(active_only=True, limit=500)
+        """
+        Cek deposit baru untuk SEMUA user aktif via transactions endpoint.
+
+        Dijalankan CONCURRENT (semaphore 5, pola sama /allsaldo) supaya satu
+        siklus selesai cepat meski ratusan user — syarat agar interval 1 menit
+        benar-benar realtime. Versi lama memproses berurutan + sleep 0.5s/user
+        sehingga 1 siklus bisa >>1 menit dan deposit telat terdeteksi.
+        """
+        sessions = await db.list_sessions(active_only=True, limit=1000)
         logger.debug("Checking deposits for %d active sessions", len(sessions))
 
-        for session in sessions:
-            try:
-                await self._check_single_deposit(session)
-            except Exception as e:
-                logger.warning(
-                    "Failed to check deposits for %s: %s", session.user_id, e
-                )
-            await asyncio.sleep(0.5)
+        semaphore = asyncio.Semaphore(5)
+
+        async def _guarded(session):
+            async with semaphore:
+                try:
+                    await self._check_single_deposit(session)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to check deposits for %s: %s", session.user_id, e
+                    )
+
+        await asyncio.gather(*[_guarded(s) for s in sessions], return_exceptions=True)
 
     async def _check_single_deposit(self, session):
         """
@@ -154,8 +165,12 @@ class NotificationService:
         - NOTIFY Telegram: hanya deposit yang terjadi SETELAH bot start
           (mencegah banjir notifikasi untuk deposit lama saat restart)
         """
+        # Deteksi cukup halaman terbaru (max_pages=1): deposit baru selalu muncul
+        # paling atas → hemat request untuk siklus tiap 1 menit.
         try:
-            transactions = await StockityAPI.get_deposit_transactions_by_session(session)
+            transactions = await StockityAPI.get_deposit_transactions_by_session(
+                session, max_pages=1
+            )
         except StockityAPIError:
             return
 

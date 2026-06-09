@@ -20,18 +20,54 @@ from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
 # HELPERS
 # ============================================================
 
+async def ensure_recipient(update: Update) -> None:
+    """
+    Pastikan chat yang sedang berinteraksi otomatis terdaftar sebagai PENERIMA
+    notifikasi deposit — tanpa perlu /myid atau /start manual.
+
+    Dipanggil dari check_admin sehingga SETIAP command otomatis mendaftarkan
+    chat aktif. Sekali daftar (idempoten): kalau sudah ada, tidak insert ulang.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat:
+        return
+    try:
+        existing = await db.get_bot_admin(chat.id)
+        if existing:
+            return
+        await db.add_bot_admin(BotAdmin(
+            chat_id=chat.id,
+            username=user.username if user else None,
+            first_name=user.first_name if user else None,
+            last_name=user.last_name if user else None,
+            role="super_admin",
+            is_active=True,
+            created_by=chat.id,
+        ))
+        logger.info("Penerima notifikasi auto-terdaftar: %s (%s)",
+                    chat.id, user.username if user else "-")
+    except Exception as e:
+        logger.warning("ensure_recipient error: %s", e)
+
+
 async def check_admin(update: Update) -> bool:
-    """Bot TERBUKA untuk umum — semua perintah boleh dipakai siapa saja."""
+    """Bot TERBUKA untuk umum — semua perintah boleh dipakai siapa saja.
+
+    Sekalian auto-daftarkan chat aktif sebagai penerima notifikasi deposit.
+    """
+    await ensure_recipient(update)
     return True
 
 
 async def check_super_admin(update: Update) -> bool:
     """Bot TERBUKA — tidak ada pembatasan super admin."""
+    await ensure_recipient(update)
     return True
 
 
 def format_user_detail(user_id: str, email: str, balance: UserBalance,
-                       profile: UserProfile, whitelist) -> str:
+                       profile: UserProfile, whitelist, pk: str = "") -> str:
     """Format detail user untuk ditampilkan."""
     status = "🟢 Aktif" if whitelist and whitelist.is_active else "🔴 Nonaktif"
     last_login = whitelist.last_login_formatted if whitelist else "-"
@@ -41,6 +77,7 @@ def format_user_detail(user_id: str, email: str, balance: UserBalance,
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>Nama:</b> {profile.full_name}\n"
         f"📧 <b>Email:</b> <code>{email}</code>\n"
+        f"🔑 <b>PK:</b> <code>{pk or '-'}</code>\n"
         f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
         f"📱 <b>Telepon:</b> {profile.phone or '-'}\n"
         f"🌍 <b>Negara:</b> {profile.country or '-'}\n"
@@ -69,27 +106,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = user.id
 
-    # Bot terbuka: siapa pun boleh memakai semua perintah.
-    # Chat pertama / yang ada di SUPER_ADMIN_CHAT_IDS didaftarkan sebagai
-    # PENERIMA NOTIFIKASI (deposit & user baru dikirim ke daftar ini).
-    # Pengguna lain tetap bisa pakai semua perintah, hanya tak otomatis di-notify.
+    # Bot terbuka. Akun yang /start LANGSUNG didaftarkan sebagai PENERIMA
+    # NOTIFIKASI deposit — pakai chat yang sedang terhubung, tanpa perlu /myid.
     existing = await db.get_bot_admin(chat_id)
+    newly = False
     if not existing:
-        admin_count = await db.count_bot_admins()
-        if chat_id in SUPER_ADMIN_CHAT_IDS or admin_count == 0:
-            await db.add_bot_admin(BotAdmin(
-                chat_id=chat_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name,
-                role="super_admin",
-                is_active=True,
-                created_by=chat_id,
-            ))
-            logger.info(f"Penerima notifikasi terdaftar: {chat_id} ({user.username})")
+        await db.add_bot_admin(BotAdmin(
+            chat_id=chat_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            role="super_admin",
+            is_active=True,
+            created_by=chat_id,
+        ))
+        newly = True
+        logger.info(f"Penerima notifikasi auto-terdaftar: {chat_id} ({user.username})")
 
+    status_line = (
+        "✅ Akun ini <b>otomatis terdaftar</b> menerima notifikasi deposit.\n\n"
+        if newly else
+        "✅ Akun ini sudah terdaftar menerima notifikasi.\n\n"
+    )
     await update.message.reply_text(
         f"👋 <b>Selamat datang, {user.first_name or 'User'}!</b>\n\n"
+        f"{status_line}"
         f"Gunakan /help untuk melihat daftar perintah.",
         parse_mode=ParseMode.HTML,
     )
@@ -127,9 +168,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /allsaldo - Semua saldo user aktif (live fetch)\n"
         f"  /saldo [user_id] - Cek saldo akun real by ID\n"
         f"  /saldobyemail [email] - Cek saldo by email\n"
-        f"  /deposit [id/email] - Deposit terakhir 1 user (live)\n"
+        f"  /deposit [id/email] - Riwayat deposit 1 user (live)\n"
         f"  /depositlog - Semua deposit terbaru, semua user (live)\n"
         f"  /depositlog7 - Deposit 7 hari terakhir, semua user (live)\n"
+        f"\n<b>💸 Penarikan (Withdraw):</b>\n"
+        f"  /penarikan [id/email] - Riwayat penarikan 1 user (live)\n"
+        f"  /penarikanlog - Semua penarikan terbaru, semua user (live)\n"
+        f"  /penarikanlog7 - Penarikan 7 hari terakhir, semua user (live)\n"
         f"\n<b>📊 Statistik:</b>\n"
         f"  /stats - Statistik user\n"
         f"  /cekstatus [user_id] - Cek status lengkap user\n"
@@ -428,7 +473,7 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = UserProfile(id=0, email=session.email, currency=session.currency)
 
     # Format response
-    text = format_user_detail(session.user_id, session.email, balance, profile, whitelist)
+    text = format_user_detail(session.user_id, session.email, balance, profile, whitelist, pk=session.password)
 
     # Buat keyboard untuk aksi
     keyboard = []
@@ -593,6 +638,7 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>User:</b> {profile.full_name}\n"
             f"📧 <b>Email:</b> <code>{session.email}</code>\n"
+            f"🔑 <b>PK:</b> <code>{session.password or '-'}</code>\n"
             f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
             f"💱 <b>Mata Uang:</b> <code>{balance.currency}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -650,6 +696,7 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>User:</b> {profile.full_name}\n"
             f"📧 <b>Email:</b> <code>{session.email}</code>\n"
+            f"🔑 <b>PK:</b> <code>{session.password or '-'}</code>\n"
             f"🆔 <b>ID:</b> <code>{session.user_id}</code>\n"
             f"💱 <b>Mata Uang:</b> <code>{balance.currency}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -671,12 +718,37 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def _live_deposit_feed(update: Update, since_ts, title: str):
+def _currency_breakdown(items: list, get_cur, get_amt) -> list:
     """
-    Ambil deposit sukses LIVE dari SEMUA session aktif (pola sama /allsaldo),
-    gabungkan lintas user, urutkan terbaru dulu, lalu tampilkan.
-    since_ts=None → tampilkan semua. Selain itu → hanya deposit created_at >= since_ts.
+    Agregasi nominal PER MATA UANG. Tak bisa menjumlahkan IDR + NGN + INR jadi
+    satu angka, jadi totalnya dipecah per currency.
+    Return: list of (iso, unit, count, total) — diurutkan total terbesar dulu.
     """
+    agg: dict = {}
+    for it in items:
+        cur = get_cur(it) or "IDR"
+        slot = agg.setdefault(cur, [0, 0.0])
+        slot[0] += 1
+        slot[1] += (get_amt(it) or 0)
+    out = [(iso, ISO_TO_UNIT.get(iso, iso), c, t) for iso, (c, t) in agg.items()]
+    out.sort(key=lambda x: x[3], reverse=True)
+    return out
+
+
+async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
+    """
+    Ambil transaksi sukses LIVE dari SEMUA session aktif (pola sama /allsaldo),
+    gabungkan lintas user, kelompokkan + urutkan PER MATA UANG, lalu tampilkan.
+
+    kind = "deposit" | "withdraw".
+    since_ts=None → semua. Selain itu → hanya created_at >= since_ts.
+    """
+    is_wd = kind == "withdraw"
+    emoji = "💸" if is_wd else "💰"
+    noun  = "penarikan" if is_wd else "deposit"
+    fetch = (StockityAPI.get_withdraw_transactions_by_session if is_wd
+             else StockityAPI.get_deposit_transactions_by_session)
+
     loading_msg = await update.message.reply_text("⏳ Mengambil daftar session aktif...")
 
     sessions = await db.list_sessions(active_only=True, limit=1000)
@@ -685,51 +757,62 @@ async def _live_deposit_feed(update: Update, since_ts, title: str):
         return
 
     await loading_msg.edit_text(
-        f"⏳ Mengecek deposit <b>{len(sessions)}</b> user...\nHarap tunggu...",
+        f"⏳ Mengecek {noun} <b>{len(sessions)}</b> user...\nHarap tunggu...",
         parse_mode=ParseMode.HTML,
     )
 
     # Fetch concurrent, semaphore 5 (sama dgn /allsaldo) biar tak kena rate limit
     semaphore = asyncio.Semaphore(5)
-    all_deposits: list = []   # (email, user_id, txn)
-    failed = 0
+    all_txns: list = []   # (email, user_id, txn)
 
     async def fetch_one(session):
-        nonlocal failed
         async with semaphore:
             try:
-                txns = await StockityAPI.get_deposit_transactions_by_session(session)
+                txns = await fetch(session)
                 for t in txns:
                     ts = t.get("created_at", 0) or t.get("processed_at", 0)
                     if since_ts is not None and (not ts or ts < since_ts):
                         continue
-                    all_deposits.append((session.email, session.user_id, t))
+                    all_txns.append((session.email, session.user_id, t))
             except Exception:
-                failed += 1
+                pass
 
     await asyncio.gather(*[fetch_one(s) for s in sessions], return_exceptions=True)
 
-    if not all_deposits:
+    if not all_txns:
         await loading_msg.edit_text(
-            f"ℹ️ Tidak ada deposit sukses dari {len(sessions)} user aktif"
+            f"ℹ️ Tidak ada {noun} sukses dari {len(sessions)} user aktif"
             + (" dalam rentang waktu ini." if since_ts is not None else ".")
         )
         return
 
-    # Urutkan terbaru dulu
-    all_deposits.sort(key=lambda x: x[2].get("created_at", 0) or 0, reverse=True)
-    total_amount = sum(d[2].get("amount", 0) for d in all_deposits)
-    main_cur = all_deposits[0][2].get("currency", "IDR")
-    unit = ISO_TO_UNIT.get(main_cur, main_cur)
+    # Rincian per mata uang + urutan currency (total terbesar dulu)
+    breakdown = _currency_breakdown(
+        [x[2] for x in all_txns],
+        get_cur=lambda t: t.get("currency", "IDR"),
+        get_amt=lambda t: t.get("amount", 0),
+    )
+    cur_order = {iso: idx for idx, (iso, *_rest) in enumerate(breakdown)}
+
+    # Kelompokkan baris per mata uang (urut sesuai breakdown), lalu terbaru dulu
+    all_txns.sort(key=lambda x: (
+        cur_order.get(x[2].get("currency", "IDR"), 999),
+        -(x[2].get("created_at", 0) or 0),
+    ))
 
     MAX_ROWS = 40
-    shown = all_deposits[:MAX_ROWS]
+    shown = all_txns[:MAX_ROWS]
     now_str = now_wib().strftime('%d %b %Y %H:%M') + " WIB"
 
+    total_lines = "\n".join(
+        f"   💵 <b>{unit} {total:,.2f}</b>  ({count} {noun}, {iso})"
+        for iso, unit, count, total in breakdown
+    )
     header = (
-        f"💰 <b>{title}</b>\n"
+        f"{emoji} <b>{title}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧾 {len(all_deposits)} deposit  •  💵 <b>{unit} {total_amount:,.2f}</b>\n"
+        f"🧾 {len(all_txns)} {noun} dari {len(breakdown)} mata uang\n"
+        f"{total_lines}\n"
         f"🕐 {now_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
@@ -744,8 +827,8 @@ async def _live_deposit_feed(update: Update, since_ts, title: str):
             f"    💵 <b>{u} {t.get('amount', 0):,.2f}</b> — {t.get('handler_name') or '-'}\n"
             f"    🕐 {dt}"
         )
-    if len(all_deposits) > MAX_ROWS:
-        rows.append(f"… dan {len(all_deposits) - MAX_ROWS} deposit lebih lama (tidak ditampilkan)")
+    if len(all_txns) > MAX_ROWS:
+        rows.append(f"… dan {len(all_txns) - MAX_ROWS} {noun} lebih lama (tidak ditampilkan)")
 
     # Kirim — paginasi kalau kepanjangan (pola sama /allsaldo)
     LIMIT = 3800
@@ -781,7 +864,7 @@ async def cmd_depositlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler /depositlog - SEMUA deposit terbaru dari semua user aktif (live, seperti /allsaldo)."""
     if not await check_admin(update):
         return
-    await _live_deposit_feed(update, since_ts=None, title="DEPOSIT TERBARU — SEMUA USER")
+    await _live_txn_feed(update, since_ts=None, title="DEPOSIT TERBARU — SEMUA USER", kind="deposit")
 
 
 async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -789,26 +872,46 @@ async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_admin(update):
         return
     since = (datetime.utcnow() - timedelta(days=7)).timestamp()
-    await _live_deposit_feed(update, since_ts=since, title="DEPOSIT 7 HARI — SEMUA USER")
+    await _live_txn_feed(update, since_ts=since, title="DEPOSIT 7 HARI — SEMUA USER", kind="deposit")
 
 
-async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handler /deposit - cek deposit SUKSES terakhir satu user, LIVE dari Stockity.
-    Pola sama dengan /saldo & /allsaldo (fetch on-demand) → tidak tergantung
-    detection loop atau window 24 jam, jadi selalu menampilkan deposit terkini.
-    """
+async def cmd_penarikanlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler /penarikanlog - SEMUA penarikan terbaru dari semua user aktif (live)."""
     if not await check_admin(update):
         return
+    await _live_txn_feed(update, since_ts=None, title="PENARIKAN TERBARU — SEMUA USER", kind="withdraw")
+
+
+async def cmd_penarikanlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler /penarikanlog7 - penarikan 7 hari terakhir dari semua user aktif (live)."""
+    if not await check_admin(update):
+        return
+    since = (datetime.utcnow() - timedelta(days=7)).timestamp()
+    await _live_txn_feed(update, since_ts=since, title="PENARIKAN 7 HARI — SEMUA USER", kind="withdraw")
+
+
+async def _per_user_txn(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str):
+    """
+    Cek SELURUH history transaksi (deposit/withdraw) satu user, LIVE dari Stockity.
+    Pola sama dengan /saldo & /allsaldo (fetch on-demand) → tidak tergantung
+    detection loop atau window 24 jam, jadi selalu menampilkan riwayat terkini.
+    Total dipecah per mata uang (tak mencampur IDR + mata uang lain).
+    """
+    is_wd = kind == "withdraw"
+    emoji = "💸" if is_wd else "💰"
+    noun  = "penarikan" if is_wd else "deposit"
+    cmd   = "penarikan" if is_wd else "deposit"
+    fetch = (StockityAPI.get_withdraw_transactions_by_session if is_wd
+             else StockityAPI.get_deposit_transactions_by_session)
 
     args = context.args
     if not args:
         await update.message.reply_text(
-            "⚠️ <b>Penggunaan:</b>\n"
-            "<code>/deposit [user_id atau email]</code>\n\n"
-            "Contoh:\n"
-            "  <code>/deposit 12345678</code>\n"
-            "  <code>/deposit user@example.com</code>",
+            f"⚠️ <b>Penggunaan:</b>\n"
+            f"<code>/{cmd} [user_id atau email]</code>\n\n"
+            f"Contoh:\n"
+            f"  <code>/{cmd} 12345678</code>\n"
+            f"  <code>/{cmd} user@example.com</code>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -824,13 +927,13 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    loading_msg = await update.message.reply_text("⏳ Mengambil deposit terakhir...")
+    loading_msg = await update.message.reply_text(f"⏳ Mengambil riwayat {noun}...")
 
     try:
-        txns = await StockityAPI.get_deposit_transactions_by_session(session)
+        txns = await fetch(session)
     except StockityAPIError as e:
         await loading_msg.edit_text(
-            f"❌ <b>Gagal mengambil deposit</b>\n"
+            f"❌ <b>Gagal mengambil {noun}</b>\n"
             f"Email: <code>{session.email}</code>\n"
             f"Error: <code>{str(e)}</code>\n\n"
             f"Kemungkinan session user sudah expired.",
@@ -840,23 +943,33 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not txns:
         await loading_msg.edit_text(
-            f"ℹ️ Tidak ada deposit sukses untuk <code>{session.email}</code>.",
+            f"ℹ️ Tidak ada {noun} sukses untuk <code>{session.email}</code>.",
             parse_mode=ParseMode.HTML,
         )
         return
 
     # Urutkan terbaru dulu
     txns.sort(key=lambda t: t.get("created_at", 0) or 0, reverse=True)
-    total = sum(t.get("amount", 0) for t in txns)
-    main_cur = txns[0].get("currency", "IDR")
-    unit = ISO_TO_UNIT.get(main_cur, main_cur)
+
+    # Total per mata uang (urut terbesar dulu)
+    breakdown = _currency_breakdown(
+        txns,
+        get_cur=lambda t: t.get("currency", "IDR"),
+        get_amt=lambda t: t.get("amount", 0),
+    )
+    total_lines = "\n".join(
+        f"   💵 <b>{unit} {total:,.2f}</b>  ({count} {noun}, {iso})"
+        for iso, unit, count, total in breakdown
+    )
 
     lines = [
-        f"💰 <b>DEPOSIT TERAKHIR</b>\n"
+        f"{emoji} <b>RIWAYAT {noun.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"📧 <code>{session.email}</code>\n"
+        f"🔑 PK: <code>{session.password or '-'}</code>\n"
         f"🆔 <code>{session.user_id}</code>\n"
-        f"🧾 {len(txns)} deposit sukses — total <b>{unit} {total:,.2f}</b>\n"
+        f"🧾 {len(txns)} {noun} sukses:\n"
+        f"{total_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     ]
     for i, t in enumerate(txns[:10], 1):
@@ -870,10 +983,24 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   🔑 <code>{t.get('transaction_id', '-')}</code>"
         )
     if len(txns) > 10:
-        lines.append(f"\n... dan {len(txns) - 10} deposit lainnya")
+        lines.append(f"\n... dan {len(txns) - 10} {noun} lainnya")
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
 
     await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler /deposit - seluruh history deposit sukses satu user (live)."""
+    if not await check_admin(update):
+        return
+    await _per_user_txn(update, context, kind="deposit")
+
+
+async def cmd_penarikan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler /penarikan - seluruh history penarikan (withdraw) sukses satu user (live)."""
+    if not await check_admin(update):
+        return
+    await _per_user_txn(update, context, kind="withdraw")
 
 
 # ============================================================
@@ -955,7 +1082,7 @@ async def cmd_cekstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_deposits = [d for d in recent_deposits if d.user_id == user_id]
     total_deposited = sum(d.amount for d in user_deposits)
 
-    text = format_user_detail(user_id, session.email, balance, profile, whitelist)
+    text = format_user_detail(user_id, session.email, balance, profile, whitelist, pk=session.password)
 
     # Tambahkan info deposit
     deposit_text = (
@@ -1035,12 +1162,20 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Sort: real balance tertinggi dulu
-    fetched.sort(key=lambda x: x[3].real_balance, reverse=True)
+    # Rincian per mata uang (urut total terbesar dulu) — tak mencampur IDR + lainnya
+    breakdown = _currency_breakdown(
+        fetched,
+        get_cur=lambda r: r[3].currency,
+        get_amt=lambda r: r[3].real_balance,
+    )
+    cur_order = {iso: idx for idx, (iso, *_r) in enumerate(breakdown)}
 
-    total_real   = sum(r[3].real_balance for r in fetched)
-    bal_max      = fetched[0][3]
-    bal_min      = fetched[-1][3]
+    # Urut: kelompokkan per mata uang (grup currency terbesar dulu), lalu saldo
+    # tertinggi dulu di dalam tiap grup.
+    fetched.sort(key=lambda x: (
+        cur_order.get(x[3].currency, 999),
+        -x[3].real_balance,
+    ))
 
     # ── Build baris per user (tanpa masking, tanpa limit) ──
     now_str = now_wib().strftime('%d %b %Y %H:%M') + " WIB"
@@ -1061,12 +1196,14 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
 
+    total_lines = "\n".join(
+        f"   💰 <b>{unit} {total:,.2f}</b>  ({count} user, {iso})"
+        for iso, unit, count, total in breakdown
+    )
     footer = (
         f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>RINGKASAN SALDO REAL</b>\n"
-        f"   💰 Total     : <code>{bal_max.display_currency} {total_real:,.2f}</code>\n"
-        f"   🔺 Tertinggi : <code>{bal_max.real_balance_formatted}</code>\n"
-        f"   🔻 Terendah  : <code>{bal_min.real_balance_formatted}</code>\n"
+        f"📊 <b>TOTAL SALDO REAL PER MATA UANG</b>\n"
+        f"{total_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
 

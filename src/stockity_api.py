@@ -274,6 +274,132 @@ class StockityAPI:
             timezone=session.user_timezone,
         )
 
+    # Pengaman: maksimum halaman yang diambil saat menyusuri seluruh history
+    # (≈ HARD_CAP * per transaksi). Mencegah loop tak berujung kalau API aneh.
+    _TXN_PAGE_HARD_CAP: int = 50
+
+    @classmethod
+    async def _get_transactions(
+        cls,
+        auth_token: str,
+        device_id: str,
+        timezone: str,
+        txn_type: str,
+        per: int = 50,
+        max_pages: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Ambil SEMUA transaksi SUKSES bertipe `txn_type` (deposit / withdraw) dari
+        Stockity API, menelusuri seluruh halaman.
+
+        PENTING: TIDAK memakai filter `repeatable=true`. Dari HAR, parameter itu
+        hanya dipakai widget "ulangi deposit" dan HANYA mengembalikan deposit yang
+        bisa diulang → banyak transaksi biasa/lama TIDAK tertangkap. Itulah
+        penyebab history (per-user maupun log gabungan) tidak lengkap.
+
+        Endpoint penuh (sama dgn halaman riwayat di web):
+            GET /platform/private/transactions?type=<t>&status=success&page=N&per=M
+        Response: { success, data: { items: [...], count } }. `count` = jumlah
+        item DI HALAMAN INI (bukan grand total), jadi paginasi berhenti saat
+        sebuah halaman mengembalikan item < per (halaman terakhir) / kosong.
+
+        Tiap item: transaction_id, amount(÷100, di-abs karena withdraw negatif),
+        currency_iso, created_at(Unix detik), processed_at, handler_name, type,
+        status.
+
+        max_pages=None → telusuri SEMUA halaman (agar total benar-benar lengkap).
+        max_pages=1    → cukup halaman pertama/terbaru (untuk loop deteksi
+                         realtime — transaksi baru selalu muncul di paling atas).
+        """
+        result: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+        page = 1
+
+        while True:
+            url = (
+                f"{cls.BASE_URL}/platform/private/transactions"
+                f"?type={txn_type}&status=success&per={per}&page={page}&locale=id"
+            )
+            headers = cls._build_headers(auth_token, device_id, timezone)
+
+            try:
+                resp = await cls._curl_get(url, headers, timeout=15)
+            except StockityAPIError:
+                if page == 1:
+                    raise           # halaman pertama gagal → laporkan error
+                break               # halaman lanjutan gagal → pakai yg sudah ada
+            except Exception as e:
+                if page == 1:
+                    logger.error(f"_get_transactions({txn_type}) error: {e}")
+                    raise StockityAPIError(f"Gagal mengambil {txn_type} transactions: {str(e)}")
+                break
+
+            api_data = resp["data"]
+
+            # Navigasi structure: { success, data: { items: [...], count } }
+            items: List[Dict] = []
+            if isinstance(api_data, dict):
+                inner = api_data.get("data", {})
+                if isinstance(inner, dict):
+                    items = inner.get("items", []) or []
+                elif isinstance(inner, list):
+                    items = inner
+            elif isinstance(api_data, list):
+                items = api_data
+
+            if not items:
+                break
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                # Pengaman ganda (server sudah filter type & status=success, tapi
+                # tetap tolak tipe lain / non-sukses / amount 0 spt biaya sistem):
+                itype = item.get("type")
+                if itype is not None and itype != txn_type:
+                    continue
+                istatus = item.get("status")
+                if istatus is not None and istatus != "success":
+                    continue
+                raw_amount = float(item.get("amount", 0) or 0)
+                if raw_amount == 0:
+                    continue
+
+                txn_id = item.get("transaction_id", "")
+                if txn_id and txn_id in seen_ids:
+                    continue
+                if txn_id:
+                    seen_ids.add(txn_id)
+
+                result.append({
+                    "transaction_id": txn_id,
+                    # amount dlm satuan sen/poin terkecil → ÷100; abs() krn
+                    # withdraw bernilai negatif di API.
+                    "amount":         abs(raw_amount) / 100,
+                    "currency":       item.get("currency_iso", "IDR"),
+                    "created_at":     item.get("created_at", 0),    # Unix timestamp
+                    "processed_at":   item.get("processed_at", 0),
+                    "handler":        item.get("handler", ""),
+                    "handler_name":   item.get("handler_name", ""),
+                    "status":         item.get("status", ""),
+                    "type":           txn_type,
+                })
+
+            # Halaman terakhir (item < per) → selesai
+            if len(items) < per:
+                break
+            if max_pages is not None and page >= max_pages:
+                break
+            if page >= cls._TXN_PAGE_HARD_CAP:
+                logger.warning(
+                    "_get_transactions(%s): mencapai batas %d halaman, berhenti",
+                    txn_type, cls._TXN_PAGE_HARD_CAP,
+                )
+                break
+            page += 1
+
+        return result
+
     @classmethod
     async def get_deposit_transactions(
         cls,
@@ -281,64 +407,53 @@ class StockityAPI:
         device_id: str,
         timezone: str = DEFAULT_TIMEZONE,
         per: int = 50,
+        max_pages: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Ambil daftar transaksi deposit sukses dari Stockity API.
-        Endpoint: GET /platform/private/transactions?type=deposit&status=success&repeatable=true
-        Dari HAR: response { success, data: { items: [...] } }
-        Setiap item punya: transaction_id, amount, currency_iso, created_at, processed_at, handler_name
-        """
-        url = (
-            f"{cls.BASE_URL}/platform/private/transactions"
-            f"?type=deposit&status=success&repeatable=true&per={per}&locale=id"
+        """Ambil semua transaksi DEPOSIT sukses (lihat _get_transactions)."""
+        return await cls._get_transactions(
+            auth_token, device_id, timezone, "deposit", per=per, max_pages=max_pages
         )
-        headers = cls._build_headers(auth_token, device_id, timezone)
-
-        try:
-            resp = await cls._curl_get(url, headers, timeout=15)
-            api_data = resp["data"]
-
-            # Navigasi structure: { success, data: { items: [...] } }
-            items: List[Dict] = []
-            if isinstance(api_data, dict):
-                inner = api_data.get("data", {})
-                if isinstance(inner, dict):
-                    items = inner.get("items", [])
-                elif isinstance(inner, list):
-                    items = inner
-            elif isinstance(api_data, list):
-                items = api_data
-
-            result = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                result.append({
-                    "transaction_id": item.get("transaction_id", ""),
-                    # API mengembalikan amount dalam satuan sen/poin terkecil, dibagi 100
-                    "amount":         float(item.get("amount", 0)) / 100,
-                    "currency":       item.get("currency_iso", "IDR"),
-                    "created_at":     item.get("created_at", 0),    # Unix timestamp
-                    "processed_at":   item.get("processed_at", 0),
-                    "handler":        item.get("handler", ""),
-                    "handler_name":   item.get("handler_name", ""),
-                    "status":         item.get("status", ""),
-                })
-            return result
-
-        except StockityAPIError:
-            raise
-        except Exception as e:
-            logger.error(f"get_deposit_transactions error: {e}")
-            raise StockityAPIError(f"Gagal mengambil deposit transactions: {str(e)}")
 
     @classmethod
-    async def get_deposit_transactions_by_session(cls, session) -> List[Dict[str, Any]]:
-        """Convenience: ambil deposit transactions dari session object."""
+    async def get_withdraw_transactions(
+        cls,
+        auth_token: str,
+        device_id: str,
+        timezone: str = DEFAULT_TIMEZONE,
+        per: int = 50,
+        max_pages: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Ambil semua transaksi PENARIKAN (withdraw) sukses (lihat _get_transactions)."""
+        return await cls._get_transactions(
+            auth_token, device_id, timezone, "withdraw", per=per, max_pages=max_pages
+        )
+
+    @classmethod
+    async def get_deposit_transactions_by_session(
+        cls, session, max_pages: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Convenience: ambil deposit transactions dari session object.
+
+        max_pages=None → seluruh history (commands tampilan).
+        max_pages=1    → hanya yang terbaru (loop deteksi realtime).
+        """
         return await cls.get_deposit_transactions(
             auth_token=session.stockity_token,
             device_id=session.device_id,
             timezone=session.user_timezone,
+            max_pages=max_pages,
+        )
+
+    @classmethod
+    async def get_withdraw_transactions_by_session(
+        cls, session, max_pages: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Convenience: ambil withdraw transactions dari session object."""
+        return await cls.get_withdraw_transactions(
+            auth_token=session.stockity_token,
+            device_id=session.device_id,
+            timezone=session.user_timezone,
+            max_pages=max_pages,
         )
 
 
