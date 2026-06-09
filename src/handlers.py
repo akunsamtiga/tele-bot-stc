@@ -4,7 +4,7 @@ Semua perintah bot didefinisikan di sini.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -168,9 +168,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /allsaldo - Semua saldo user aktif (live fetch)\n"
         f"  /saldo [user_id] - Cek saldo akun real by ID\n"
         f"  /saldobyemail [email] - Cek saldo by email\n"
-        f"  /deposit [id/email] - Deposit terakhir user (live)\n"
-        f"  /depositlog - Log deposit 24 jam terakhir\n"
-        f"  /depositlog7 - Log deposit 7 hari terakhir\n"
+        f"  /deposit [id/email] - Deposit terakhir 1 user (live)\n"
+        f"  /depositlog - Semua deposit terbaru, semua user (live)\n"
+        f"  /depositlog7 - Deposit 7 hari terakhir, semua user (live)\n"
         f"\n<b>📊 Statistik:</b>\n"
         f"  /stats - Statistik user\n"
         f"  /cekstatus [user_id] - Cek status lengkap user\n"
@@ -714,81 +714,127 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def _live_deposit_feed(update: Update, since_ts, title: str):
+    """
+    Ambil deposit sukses LIVE dari SEMUA session aktif (pola sama /allsaldo),
+    gabungkan lintas user, urutkan terbaru dulu, lalu tampilkan.
+    since_ts=None → tampilkan semua. Selain itu → hanya deposit created_at >= since_ts.
+    """
+    loading_msg = await update.message.reply_text("⏳ Mengambil daftar session aktif...")
+
+    sessions = await db.list_sessions(active_only=True, limit=1000)
+    if not sessions:
+        await loading_msg.edit_text("ℹ️ Tidak ada session aktif.")
+        return
+
+    await loading_msg.edit_text(
+        f"⏳ Mengecek deposit <b>{len(sessions)}</b> user...\nHarap tunggu...",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Fetch concurrent, semaphore 5 (sama dgn /allsaldo) biar tak kena rate limit
+    semaphore = asyncio.Semaphore(5)
+    all_deposits: list = []   # (email, user_id, txn)
+    failed = 0
+
+    async def fetch_one(session):
+        nonlocal failed
+        async with semaphore:
+            try:
+                txns = await StockityAPI.get_deposit_transactions_by_session(session)
+                for t in txns:
+                    ts = t.get("created_at", 0) or t.get("processed_at", 0)
+                    if since_ts is not None and (not ts or ts < since_ts):
+                        continue
+                    all_deposits.append((session.email, session.user_id, t))
+            except Exception:
+                failed += 1
+
+    await asyncio.gather(*[fetch_one(s) for s in sessions], return_exceptions=True)
+
+    if not all_deposits:
+        await loading_msg.edit_text(
+            f"ℹ️ Tidak ada deposit sukses dari {len(sessions)} user aktif"
+            + (" dalam rentang waktu ini." if since_ts is not None else ".")
+        )
+        return
+
+    # Urutkan terbaru dulu
+    all_deposits.sort(key=lambda x: x[2].get("created_at", 0) or 0, reverse=True)
+    total_amount = sum(d[2].get("amount", 0) for d in all_deposits)
+    main_cur = all_deposits[0][2].get("currency", "IDR")
+    unit = ISO_TO_UNIT.get(main_cur, main_cur)
+
+    MAX_ROWS = 40
+    shown = all_deposits[:MAX_ROWS]
+    now_str = datetime.utcnow().strftime('%d %b %Y %H:%M') + " UTC"
+
+    header = (
+        f"💰 <b>{title}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧾 {len(all_deposits)} deposit dari {len(sessions)} user aktif"
+        + (f"  ❌ gagal: {failed}" if failed else "") + "\n"
+        f"💵 Total: <b>{unit} {total_amount:,.2f}</b>\n"
+        f"🕐 {now_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    rows = []
+    for i, (email, uid, t) in enumerate(shown, 1):
+        ts = t.get("created_at", 0) or t.get("processed_at", 0)
+        dt = datetime.utcfromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else "-"
+        u = ISO_TO_UNIT.get(t.get("currency", "IDR"), t.get("currency", "IDR"))
+        rows.append(
+            f"<b>{i}.</b> 📧 <code>{email}</code>\n"
+            f"    💵 <b>{u} {t.get('amount', 0):,.2f}</b> — {t.get('handler_name') or '-'}\n"
+            f"    🕐 {dt}"
+        )
+    if len(all_deposits) > MAX_ROWS:
+        rows.append(f"… dan {len(all_deposits) - MAX_ROWS} deposit lebih lama (tidak ditampilkan)")
+
+    # Kirim — paginasi kalau kepanjangan (pola sama /allsaldo)
+    LIMIT = 3800
+    full = header + "\n\n".join(rows)
+    if len(full) <= LIMIT:
+        await loading_msg.edit_text(full, parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        await loading_msg.delete()
+    except Exception:
+        pass
+
+    chunks: list = []
+    current = header
+    for row in rows:
+        candidate = current + row + "\n\n"
+        if len(candidate) > LIMIT:
+            chunks.append(current.rstrip())
+            current = row + "\n\n"
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    total_pages = len(chunks)
+    for idx, chunk in enumerate(chunks, 1):
+        prefix = f"📋 <b>Halaman {idx}/{total_pages}</b>\n" if total_pages > 1 else ""
+        await update.message.reply_text(prefix + chunk, parse_mode=ParseMode.HTML)
+
+
 async def cmd_depositlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /depositlog - lihat log deposit 24 jam terakhir."""
+    """Handler /depositlog - SEMUA deposit terbaru dari semua user aktif (live, seperti /allsaldo)."""
     if not await check_admin(update):
         return
-
-    loading_msg = await update.message.reply_text("⏳ Mengambil log deposit...")
-
-    deposits = await db.get_recent_deposits(hours=24)
-
-    if not deposits:
-        await loading_msg.edit_text(
-            "ℹ️ Tidak ada deposit yang terdeteksi dalam 24 jam terakhir.",
-        )
-        return
-
-    lines = [f"💰 <b>LOG DEPOSIT 24 JAM ({len(deposits)} transaksi)</b>\n━━━━━━━━━━━━━━━━━━━━━"]
-
-    for i, dep in enumerate(deposits[:20], 1):
-        lines.append(
-            f"\n{i}. 📧 <code>{dep.email}</code>\n"
-            f"   💵 <b>{dep.amount_formatted}</b>\n"
-            f"   📊 Balance: {dep.previous_balance:,.0f} → {dep.new_balance:,.0f}\n"
-            f"   🕐 {dep.detected_at.strftime('%d %b %H:%M')}"
-        )
-
-    if len(deposits) > 20:
-        lines.append(f"\n... dan {len(deposits) - 20} transaksi lainnya")
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
-    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await _live_deposit_feed(update, since_ts=None, title="DEPOSIT TERBARU — SEMUA USER")
 
 
 async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /depositlog7 - lihat log deposit 7 hari terakhir."""
+    """Handler /depositlog7 - deposit 7 hari terakhir dari semua user aktif (live)."""
     if not await check_admin(update):
         return
-
-    loading_msg = await update.message.reply_text("⏳ Mengambil log deposit...")
-
-    deposits = await db.get_recent_deposits(hours=168)  # 7 hari
-
-    if not deposits:
-        await loading_msg.edit_text(
-            "ℹ️ Tidak ada deposit yang terdeteksi dalam 7 hari terakhir.",
-        )
-        return
-
-    # Group by date
-    from collections import defaultdict
-    by_date = defaultdict(list)
-    for dep in deposits:
-        date_key = dep.detected_at.strftime("%Y-%m-%d")
-        by_date[date_key].append(dep)
-
-    lines = [f"💰 <b>LOG DEPOSIT 7 HARI ({len(deposits)} transaksi)</b>\n━━━━━━━━━━━━━━━━━━━━━"]
-
-    for date_key in sorted(by_date.keys(), reverse=True):
-        day_deps = by_date[date_key]
-        total_amount = sum(d.amount for d in day_deps)
-        first_dep = day_deps[0]
-        unit = first_dep.amount_formatted.split()[0]
-
-        lines.append(
-            f"\n📅 <b>{date_key}</b> — {len(day_deps)} transaksi, total {unit} {total_amount:,.2f}"
-        )
-
-        for dep in day_deps[:5]:  # Max 5 per hari
-            lines.append(
-                f"   • <code>{dep.email}</code>: {dep.amount_formatted}"
-            )
-        if len(day_deps) > 5:
-            lines.append(f"   ... dan {len(day_deps) - 5} lainnya")
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
-    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    since = (datetime.utcnow() - timedelta(days=7)).timestamp()
+    await _live_deposit_feed(update, since_ts=since, title="DEPOSIT 7 HARI — SEMUA USER")
 
 
 async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
