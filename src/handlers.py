@@ -763,7 +763,7 @@ async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
 
     # Fetch concurrent, semaphore 5 (sama dgn /allsaldo) biar tak kena rate limit
     semaphore = asyncio.Semaphore(5)
-    all_txns: list = []   # (email, user_id, txn)
+    all_txns: list = []   # (email, user_id, pk, txn)
 
     async def fetch_one(session):
         async with semaphore:
@@ -773,7 +773,7 @@ async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
                     ts = t.get("created_at", 0) or t.get("processed_at", 0)
                     if since_ts is not None and (not ts or ts < since_ts):
                         continue
-                    all_txns.append((session.email, session.user_id, t))
+                    all_txns.append((session.email, session.user_id, session.password, t))
             except Exception:
                 pass
 
@@ -788,7 +788,7 @@ async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
 
     # Rincian per mata uang + urutan currency (total terbesar dulu)
     breakdown = _currency_breakdown(
-        [x[2] for x in all_txns],
+        [x[3] for x in all_txns],
         get_cur=lambda t: t.get("currency", "IDR"),
         get_amt=lambda t: t.get("amount", 0),
     )
@@ -796,8 +796,8 @@ async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
 
     # Kelompokkan baris per mata uang (urut sesuai breakdown), lalu terbaru dulu
     all_txns.sort(key=lambda x: (
-        cur_order.get(x[2].get("currency", "IDR"), 999),
-        -(x[2].get("created_at", 0) or 0),
+        cur_order.get(x[3].get("currency", "IDR"), 999),
+        -(x[3].get("created_at", 0) or 0),
     ))
 
     MAX_ROWS = 40
@@ -818,12 +818,13 @@ async def _live_txn_feed(update: Update, since_ts, title: str, kind: str):
     )
 
     rows = []
-    for i, (email, uid, t) in enumerate(shown, 1):
+    for i, (email, uid, pk, t) in enumerate(shown, 1):
         ts = t.get("created_at", 0) or t.get("processed_at", 0)
         dt = ts_to_wib(ts).strftime("%d %b %Y %H:%M") if ts else "-"
         u = ISO_TO_UNIT.get(t.get("currency", "IDR"), t.get("currency", "IDR"))
         rows.append(
             f"<b>{i}.</b> 📧 <code>{email}</code>\n"
+            f"    🔑 PK : <code>{pk or '-'}</code>\n"
             f"    💵 <b>{u} {t.get('amount', 0):,.2f}</b> — {t.get('handler_name') or '-'}\n"
             f"    🕐 {dt}"
         )
