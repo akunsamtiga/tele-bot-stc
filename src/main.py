@@ -23,7 +23,7 @@ from handlers import (
     # User management
     cmd_users, cmd_user, cmd_search, cmd_aktifkan, cmd_nonaktifkan,
     # Balance & Deposit
-    cmd_saldo, cmd_saldobyemail, cmd_depositlog, cmd_depositlog7, cmd_allsaldo,
+    cmd_saldo, cmd_saldobyemail, cmd_depositlog, cmd_depositlog7, cmd_allsaldo, cmd_deposit,
     # Statistics
     cmd_stats, cmd_cekstatus,
     # Communication
@@ -68,6 +68,7 @@ class TelegramAdminBot:
             # Balance & Deposit
             CommandHandler("saldo", cmd_saldo),
             CommandHandler("saldobyemail", cmd_saldobyemail),
+            CommandHandler("deposit", cmd_deposit),
             CommandHandler("depositlog", cmd_depositlog),
             CommandHandler("depositlog7", cmd_depositlog7),
             CommandHandler("allsaldo", cmd_allsaldo),

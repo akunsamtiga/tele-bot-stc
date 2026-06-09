@@ -11,11 +11,12 @@ from typing import Optional
 # CURRENCY MAPPING (dipakai di seluruh modul)
 # ============================================================
 ISO_TO_UNIT: dict[str, str] = {
+    # Selaras dengan ISO_TO_UNIT backend (profile.service.ts) & frontend (userProfileApi.ts)
     "IDR": "Rp", "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$",
     "COP": "Col$", "MXN": "MX$", "ARS": "AR$", "PEN": "S/", "CLP": "CL$",
-    "NGN": "N", "KES": "KSh", "GHS": "GHc", "ZAR": "R",
-    "INR": "Rs", "PKR": "Rs", "BDT": "৳", "LKR": "Rs",
-    "PHP": "P", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
+    "NGN": "₦", "KES": "KSh", "GHS": "GH₵", "ZAR": "R",
+    "INR": "₹", "PKR": "₨", "BDT": "৳", "LKR": "Rs",
+    "PHP": "₱", "VND": "₫", "THB": "฿", "MYR": "RM", "SGD": "S$",
     "TRY": "₺", "UAH": "₴", "KZT": "₸", "UZS": "so'm",
     "RUB": "₽", "AMD": "֏", "AZN": "₼", "GEL": "₾",
     "EGP": "E£", "MAD": "MAD", "TND": "DT", "DZD": "DA",

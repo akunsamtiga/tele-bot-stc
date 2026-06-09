@@ -633,28 +633,5 @@ class SupabaseDB:
             logger.error(f"get_user_statistics error: {e}")
             return UserStatistics()
 
-    # ============================================================
-    # REALTIME SUBSCRIPTION
-    # ============================================================
-
-    async def subscribe_to_table(
-        self, table: str, callback, event: str = "*"
-    ):
-        """Subscribe ke perubahan tabel Supabase Realtime."""
-        try:
-            channel = self.client.channel(f"public:{table}")
-            channel.on(
-                "postgres_changes",
-                {"event": event, "schema": "public", "table": table},
-                callback,
-            )
-            channel.subscribe()
-            logger.info(f"Subscribed to realtime changes on table: {table}")
-            return channel
-        except Exception as e:
-            logger.error(f"subscribe_to_table error: {e}")
-            return None
-
-
 # Singleton instance
 db = SupabaseDB()

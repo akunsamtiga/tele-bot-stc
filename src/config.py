@@ -45,11 +45,6 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 STOCKITY_API_URL: str = os.getenv("STOCKITY_API_URL", "https://api.stockity.id")
 
 # ============================================================
-# BACKEND API
-# ============================================================
-BACKEND_API_URL: str = os.getenv("BACKEND_API_URL", "http://localhost:3000")
-
-# ============================================================
 # MODE OPERASI
 # ============================================================
 BOT_MODE: str = os.getenv("BOT_MODE", "polling")  # polling | webhook

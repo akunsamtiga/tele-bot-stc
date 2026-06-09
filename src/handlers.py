@@ -14,7 +14,7 @@ from telegram.constants import ParseMode
 from config import logger, SUPER_ADMIN_CHAT_IDS
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
-from models import UserBalance, UserProfile, BotAdmin
+from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
 
 # ============================================================
 # HELPERS
@@ -168,6 +168,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /allsaldo - Semua saldo user aktif (live fetch)\n"
         f"  /saldo [user_id] - Cek saldo akun real by ID\n"
         f"  /saldobyemail [email] - Cek saldo by email\n"
+        f"  /deposit [id/email] - Deposit terakhir user (live)\n"
         f"  /depositlog - Log deposit 24 jam terakhir\n"
         f"  /depositlog7 - Log deposit 7 hari terakhir\n"
         f"\n<b>📊 Statistik:</b>\n"
@@ -787,6 +788,90 @@ async def cmd_depositlog7(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"   ... dan {len(day_deps) - 5} lainnya")
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
+    await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler /deposit - cek deposit SUKSES terakhir satu user, LIVE dari Stockity.
+    Pola sama dengan /saldo & /allsaldo (fetch on-demand) → tidak tergantung
+    detection loop atau window 24 jam, jadi selalu menampilkan deposit terkini.
+    """
+    if not await check_admin(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "⚠️ <b>Penggunaan:</b>\n"
+            "<code>/deposit [user_id atau email]</code>\n\n"
+            "Contoh:\n"
+            "  <code>/deposit 12345678</code>\n"
+            "  <code>/deposit user@example.com</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    identifier = args[0]
+    session = await db.get_session(identifier)
+    if not session:
+        session = await db.get_session_by_email(identifier)
+    if not session:
+        await update.message.reply_text(
+            f"❌ User dengan ID/email <code>{identifier}</code> tidak ditemukan.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    loading_msg = await update.message.reply_text("⏳ Mengambil deposit terakhir...")
+
+    try:
+        txns = await StockityAPI.get_deposit_transactions_by_session(session)
+    except StockityAPIError as e:
+        await loading_msg.edit_text(
+            f"❌ <b>Gagal mengambil deposit</b>\n"
+            f"Email: <code>{session.email}</code>\n"
+            f"Error: <code>{str(e)}</code>\n\n"
+            f"Kemungkinan session user sudah expired.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not txns:
+        await loading_msg.edit_text(
+            f"ℹ️ Tidak ada deposit sukses untuk <code>{session.email}</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Urutkan terbaru dulu
+    txns.sort(key=lambda t: t.get("created_at", 0) or 0, reverse=True)
+    total = sum(t.get("amount", 0) for t in txns)
+    main_cur = txns[0].get("currency", "IDR")
+    unit = ISO_TO_UNIT.get(main_cur, main_cur)
+
+    lines = [
+        f"💰 <b>DEPOSIT TERAKHIR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📧 <code>{session.email}</code>\n"
+        f"🆔 <code>{session.user_id}</code>\n"
+        f"🧾 {len(txns)} deposit sukses — total <b>{unit} {total:,.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    for i, t in enumerate(txns[:10], 1):
+        ts = t.get("created_at", 0) or t.get("processed_at", 0)
+        dt = datetime.utcfromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else "-"
+        u = ISO_TO_UNIT.get(t.get("currency", "IDR"), t.get("currency", "IDR"))
+        lines.append(
+            f"\n{i}. 💵 <b>{u} {t.get('amount', 0):,.2f}</b>\n"
+            f"   💳 {t.get('handler_name') or '-'}\n"
+            f"   🕐 {dt} UTC\n"
+            f"   🔑 <code>{t.get('transaction_id', '-')}</code>"
+        )
+    if len(txns) > 10:
+        lines.append(f"\n... dan {len(txns) - 10} deposit lainnya")
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
+
     await loading_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 

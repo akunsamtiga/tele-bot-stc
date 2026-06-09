@@ -261,14 +261,18 @@ class NotificationService:
                 added_by = user.added_by or "system"
                 is_self_register = added_by == "system"
 
+                # NOTE: jangan masukkan kondisional ini ke dalam f-string multi-baris.
+                # Newline di dalam f"..." (non-triple-quote) baru legal sejak Python 3.12
+                # (PEP 701) → di Ubuntu 22.04/Python 3.10 jadi SyntaxError saat import.
+                msg_text = (
+                    "User baru telah mendaftar sendiri"
+                    if is_self_register
+                    else f"User baru ditambahkan oleh admin {added_by}"
+                )
                 event = NotificationEvent(
                     event_type="new_user",
                     title="User Baru Terdaftar",
-                    message=(
-                        f"{'User baru telah mendaftar sendiri'
-                         if is_self_register else
-                         f'User baru ditambahkan oleh admin {added_by}'}"
-                    ),
+                    message=msg_text,
                     user_id=user.user_id,
                     email=user.email,
                     metadata={

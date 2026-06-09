@@ -50,13 +50,19 @@ CREATE TABLE IF NOT EXISTS deposit_events (
     currency TEXT DEFAULT 'IDR',
     previous_balance NUMERIC DEFAULT 0,
     new_balance NUMERIC DEFAULT 0,
+    -- transaction_id: ID unik transaksi Stockity. WAJIB ada — bot meng-upsert
+    -- on_conflict=transaction_id. Tanpa kolom ini semua penyimpanan deposit gagal.
+    transaction_id TEXT,
     detected_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_deposit_events_user_id 
+CREATE INDEX IF NOT EXISTS idx_deposit_events_user_id
     ON deposit_events(user_id);
-CREATE INDEX IF NOT EXISTS idx_deposit_events_detected_at 
+CREATE INDEX IF NOT EXISTS idx_deposit_events_detected_at
     ON deposit_events(detected_at DESC);
+-- Unique agar upsert(on_conflict="transaction_id") bekerja & anti-duplikat.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_events_txn_id
+    ON deposit_events(transaction_id);
 
 COMMENT ON TABLE deposit_events IS 'Event deposit yang terdeteksi oleh bot';
 
@@ -92,19 +98,25 @@ BEGIN
     END IF;
 END $$;
 
--- 5. Row Level Security (RLS) - Opsional tapi direkomendasikan
+-- 5. Row Level Security (RLS) - WAJIB: kunci ke service_role saja
 -- ============================================================
--- Bot menggunakan Service Role Key jadi RLS tidak wajib,
--- tapi good practice untuk mengaktifkan
+-- Bot memakai Service Role Key yang BYPASS RLS → bot tetap berjalan normal.
+-- RLS ON + 0 policy = role `anon` & `authenticated` DITOLAK total.
+--
+-- ⚠️ JANGAN buat policy "USING (true)" di tabel ini. Anon key publik ter-embed
+-- di bundle frontend; policy permisif akan membuat siapa pun bisa:
+--   - INSERT dirinya ke bot_admins sebagai super_admin → ambil alih bot Telegram,
+--   - membaca deposit_events (email + nominal deposit) & chat_id admin.
+-- Pola ini selaras dengan stcvps/src/supabase/lockdown-backend-tables.sql.
 
-ALTER TABLE bot_admins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_admins      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE balance_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE deposit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deposit_events  ENABLE ROW LEVEL SECURITY;
 
--- Policy: bot_admins readable by all (karena pakai service key)
-CREATE POLICY "Allow all" ON bot_admins FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all" ON balance_history FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all" ON deposit_events FOR ALL USING (true) WITH CHECK (true);
+-- Cabut policy permisif lama jika pernah dibuat (idempoten, aman dijalankan ulang).
+DROP POLICY IF EXISTS "Allow all" ON bot_admins;
+DROP POLICY IF EXISTS "Allow all" ON balance_history;
+DROP POLICY IF EXISTS "Allow all" ON deposit_events;
 
 -- ============================================================
 -- SEED DATA (Opsional)
