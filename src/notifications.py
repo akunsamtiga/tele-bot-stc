@@ -13,7 +13,8 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from config import (
-    NOTIFICATION_CHANNEL_ID, DEPOSIT_CHECK_INTERVAL, logger
+    NOTIFICATION_CHANNEL_ID, DEPOSIT_CHECK_INTERVAL, logger,
+    now_wib, naive_utc_to_wib,
 )
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
@@ -338,7 +339,7 @@ class NotificationService:
             f"💵 <b>Jumlah:</b> <code>{event.amount_formatted}</code>"
             f"{txn_line}"
             f"{handler_line}\n"
-            f"🕐 <b>Waktu:</b> {event.detected_at.strftime('%d %b %Y %H:%M:%S')} UTC\n"
+            f"🕐 <b>Waktu:</b> {naive_utc_to_wib(event.detected_at).strftime('%d %b %Y %H:%M:%S')} WIB\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
         await self.send_to_admins(message)
@@ -357,7 +358,7 @@ class NotificationService:
             f"🆔 <b>User ID:</b> <code>{event.user_id or '-'}</code>\n"
             f"👤 <b>Nama:</b> {metadata.get('name') or '-'}\n"
             f"🏷️ <b>Sumber:</b> {'Registrasi mandiri' if is_self else f'Ditambahkan oleh {added_by}'}\n"
-            f"🕐 <b>Waktu:</b> {event.created_at.strftime('%d %b %Y %H:%M:%S')} UTC\n"
+            f"🕐 <b>Waktu:</b> {naive_utc_to_wib(event.created_at).strftime('%d %b %Y %H:%M:%S')} WIB\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
         await self.send_to_admins(message)
@@ -370,7 +371,7 @@ class NotificationService:
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 User <code>{email}</code> baru saja login\n"
             f"🆔 ID: <code>{user_id}</code>\n"
-            f"🕐 Waktu: {datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC\n"
+            f"🕐 Waktu: {now_wib().strftime('%d %b %Y %H:%M:%S')} WIB\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
         await self.send_to_admins(message)

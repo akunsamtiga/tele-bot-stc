@@ -4,8 +4,19 @@ Mirrors struktur data dari backend NestJS + frontend.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+# Zona waktu tampilan WIB (UTC+7). Waktu DB tetap UTC; ini hanya untuk display.
+_WIB = timezone(timedelta(hours=7))
+
+
+def _fmt_wib(iso_str: str, fmt: str = "%d %b %Y %H:%M") -> str:
+    """ISO string (UTC/timestamptz) → string WIB + ' WIB'."""
+    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_WIB).strftime(fmt) + " WIB"
 
 # ============================================================
 # CURRENCY MAPPING (dipakai di seluruh modul)
@@ -73,8 +84,7 @@ class WhitelistUser:
         if not self.added_at:
             return "-"
         try:
-            dt = datetime.fromisoformat(self.added_at.replace("Z", "+00:00"))
-            return dt.strftime("%d %b %Y %H:%M")
+            return _fmt_wib(self.added_at)
         except:
             return self.added_at
 
@@ -83,8 +93,7 @@ class WhitelistUser:
         if not self.last_login:
             return "Belum pernah"
         try:
-            dt = datetime.fromisoformat(self.last_login.replace("Z", "+00:00"))
-            return dt.strftime("%d %b %Y %H:%M")
+            return _fmt_wib(self.last_login)
         except:
             return self.last_login
 
@@ -204,8 +213,7 @@ class UserProfile:
         if not self.registered_at:
             return "-"
         try:
-            dt = datetime.fromisoformat(self.registered_at.replace("Z", "+00:00"))
-            return dt.strftime("%d %b %Y %H:%M")
+            return _fmt_wib(self.registered_at)
         except:
             return self.registered_at
 

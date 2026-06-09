@@ -11,7 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import logger, SUPER_ADMIN_CHAT_IDS
+from config import logger, SUPER_ADMIN_CHAT_IDS, now_wib, ts_to_wib
 from database import db
 from stockity_api import StockityAPI, StockityAPIError
 from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
@@ -202,7 +202,7 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Latency: <code>{elapsed:.1f}ms</code>\n"
         f"🗄️ Supabase: <code>Connected</code>\n"
         f"👥 Total Users: <code>{stats.total}</code>\n"
-        f"📅 Server Time: <code>{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</code>\n"
+        f"📅 Server Time: <code>{now_wib().strftime('%Y-%m-%d %H:%M:%S')} WIB</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━",
         parse_mode=ParseMode.HTML,
     )
@@ -640,7 +640,7 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 <b>Saldo Real:</b> <code>{balance.real_balance_formatted}</code>\n"
             f"🎮 <b>Saldo Demo:</b> <code>{balance.demo_balance_formatted}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🕐 Diperiksa: <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>\n"
+            f"🕐 Diperiksa: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -698,7 +698,7 @@ async def cmd_saldobyemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 <b>Saldo Real:</b> <code>{balance.real_balance_formatted}</code>\n"
             f"🎮 <b>Saldo Demo:</b> <code>{balance.demo_balance_formatted}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🕐 Diperiksa: <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>\n"
+            f"🕐 Diperiksa: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -767,14 +767,12 @@ async def _live_deposit_feed(update: Update, since_ts, title: str):
 
     MAX_ROWS = 40
     shown = all_deposits[:MAX_ROWS]
-    now_str = datetime.utcnow().strftime('%d %b %Y %H:%M') + " UTC"
+    now_str = now_wib().strftime('%d %b %Y %H:%M') + " WIB"
 
     header = (
         f"💰 <b>{title}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧾 {len(all_deposits)} deposit dari {len(sessions)} user aktif"
-        + (f"  ❌ gagal: {failed}" if failed else "") + "\n"
-        f"💵 Total: <b>{unit} {total_amount:,.2f}</b>\n"
+        f"🧾 {len(all_deposits)} deposit  •  💵 <b>{unit} {total_amount:,.2f}</b>\n"
         f"🕐 {now_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
@@ -782,7 +780,7 @@ async def _live_deposit_feed(update: Update, since_ts, title: str):
     rows = []
     for i, (email, uid, t) in enumerate(shown, 1):
         ts = t.get("created_at", 0) or t.get("processed_at", 0)
-        dt = datetime.utcfromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else "-"
+        dt = ts_to_wib(ts).strftime("%d %b %Y %H:%M") if ts else "-"
         u = ISO_TO_UNIT.get(t.get("currency", "IDR"), t.get("currency", "IDR"))
         rows.append(
             f"<b>{i}.</b> 📧 <code>{email}</code>\n"
@@ -906,12 +904,12 @@ async def cmd_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     for i, t in enumerate(txns[:10], 1):
         ts = t.get("created_at", 0) or t.get("processed_at", 0)
-        dt = datetime.utcfromtimestamp(ts).strftime("%d %b %Y %H:%M") if ts else "-"
+        dt = ts_to_wib(ts).strftime("%d %b %Y %H:%M") if ts else "-"
         u = ISO_TO_UNIT.get(t.get("currency", "IDR"), t.get("currency", "IDR"))
         lines.append(
             f"\n{i}. 💵 <b>{u} {t.get('amount', 0):,.2f}</b>\n"
             f"   💳 {t.get('handler_name') or '-'}\n"
-            f"   🕐 {dt} UTC\n"
+            f"   🕐 {dt} WIB\n"
             f"   🔑 <code>{t.get('transaction_id', '-')}</code>"
         )
     if len(txns) > 10:
@@ -950,7 +948,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>🤖 Bot Admins:</b>\n"
         f"   Total: <code>{total_bot_admins}</code>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 Diperbarui: <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>\n"
+        f"🕐 Diperbarui: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -1079,7 +1077,7 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal_min      = fetched[-1][3]
 
     # ── Build baris per user (tanpa masking, tanpa limit) ──
-    now_str = datetime.utcnow().strftime('%d %b %Y %H:%M') + " UTC"
+    now_str = now_wib().strftime('%d %b %Y %H:%M') + " WIB"
     rows = []
     for i, (email, user_id, pk, balance) in enumerate(fetched, 1):
         rows.append(
@@ -1092,8 +1090,7 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (
         f"💰 <b>ALL SALDO</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Berhasil : <b>{len(fetched)}</b> / {total_sessions}"
-        + (f"  ❌ Gagal : <b>{failed_count}</b>" if failed_count else "") + "\n"
+        f"✅ <b>{len(fetched)}</b> user\n"
         f"🕐 <code>{now_str}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
@@ -1171,7 +1168,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📢 <b>BROADCAST DARI ADMIN</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 Dari: <b>{sender_name}</b>\n"
-        f"🕐 Waktu: <code>{datetime.utcnow().strftime('%d %b %Y %H:%M:%S')} UTC</code>\n"
+        f"🕐 Waktu: <code>{now_wib().strftime('%d %b %Y %H:%M:%S')} WIB</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{message}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━"

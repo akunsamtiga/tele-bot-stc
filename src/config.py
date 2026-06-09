@@ -5,6 +5,7 @@ Semua variabel lingkungan di-load dari .env
 
 import os
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -75,6 +76,37 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEZONE = "Asia/Bangkok"
+
+# ============================================================
+# ZONA WAKTU TAMPILAN — WIB (Asia/Jakarta, UTC+7, tanpa DST)
+# ============================================================
+# Dipakai HANYA untuk tampilan di pesan Telegram. Waktu internal/DB tetap UTC.
+WIB = timezone(timedelta(hours=7))
+
+
+def now_wib() -> datetime:
+    """Waktu sekarang dalam WIB (tz-aware)."""
+    return datetime.now(WIB)
+
+
+def ts_to_wib(ts) -> datetime:
+    """Unix timestamp (detik, UTC) → datetime WIB."""
+    return datetime.fromtimestamp(ts, WIB)
+
+
+def naive_utc_to_wib(dt: datetime) -> datetime:
+    """datetime naive (dianggap UTC) → WIB."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(WIB)
+
+
+def iso_to_wib(s: str) -> datetime:
+    """String ISO (UTC/timestamptz) → datetime WIB."""
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(WIB)
 
 
 def setup_logging() -> logging.Logger:
