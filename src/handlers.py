@@ -1026,6 +1026,15 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Sembunyikan user bersaldo real 0 agar pesan ringkas (balance tetap di-fetch).
+    zero_count = sum(1 for r in fetched if r[3].real_balance <= 0)
+    fetched = [r for r in fetched if r[3].real_balance > 0]
+    if not fetched:
+        await loading_msg.edit_text(
+            f"ℹ️ Tidak ada user dengan saldo real > 0 dari {total_sessions} session aktif."
+        )
+        return
+
     # Sort: real balance tertinggi dulu
     fetched.sort(key=lambda x: x[3].real_balance, reverse=True)
 
@@ -1046,7 +1055,8 @@ async def cmd_allsaldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (
         f"💰 <b>ALL SALDO</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ <b>{len(fetched)}</b> user\n"
+        f"✅ <b>{len(fetched)}</b> user bersaldo"
+        + (f"  •  {zero_count} saldo 0 disembunyikan" if zero_count else "") + "\n"
         f"🕐 <code>{now_str}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
