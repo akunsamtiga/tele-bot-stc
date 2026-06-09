@@ -21,29 +21,13 @@ from models import UserBalance, UserProfile, BotAdmin, ISO_TO_UNIT
 # ============================================================
 
 async def check_admin(update: Update) -> bool:
-    """Cek apakah user adalah admin bot."""
-    chat_id = update.effective_user.id
-    is_admin = await db.is_bot_admin(chat_id)
-    if not is_admin:
-        await update.message.reply_text(
-            "⛔ <b>Akses Ditolak</b>\n"
-            "Anda tidak memiliki izin untuk mengakses bot ini.",
-            parse_mode=ParseMode.HTML,
-        )
-    return is_admin
+    """Bot TERBUKA untuk umum — semua perintah boleh dipakai siapa saja."""
+    return True
 
 
 async def check_super_admin(update: Update) -> bool:
-    """Cek apakah user adalah super admin bot."""
-    chat_id = update.effective_user.id
-    is_sadmin = await db.is_super_admin(chat_id)
-    if not is_sadmin:
-        await update.message.reply_text(
-            "⛔ <b>Akses Ditolak</b>\n"
-            "Hanya super admin yang bisa menggunakan perintah ini.",
-            parse_mode=ParseMode.HTML,
-        )
-    return is_sadmin
+    """Bot TERBUKA — tidak ada pembatasan super admin."""
+    return True
 
 
 def format_user_detail(user_id: str, email: str, balance: UserBalance,
@@ -82,58 +66,34 @@ def format_user_detail(user_id: str, email: str, balance: UserBalance,
 # ============================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk /start - inisialisasi admin."""
+    """Handler /start - bot terbuka untuk umum."""
     user = update.effective_user
     chat_id = user.id
 
-    # Cek apakah sudah terdaftar sebagai admin
+    # Bot terbuka: siapa pun boleh memakai semua perintah.
+    # Chat pertama / yang ada di SUPER_ADMIN_CHAT_IDS didaftarkan sebagai
+    # PENERIMA NOTIFIKASI (deposit & user baru dikirim ke daftar ini).
+    # Pengguna lain tetap bisa pakai semua perintah, hanya tak otomatis di-notify.
     existing = await db.get_bot_admin(chat_id)
+    if not existing:
+        admin_count = await db.count_bot_admins()
+        if chat_id in SUPER_ADMIN_CHAT_IDS or admin_count == 0:
+            await db.add_bot_admin(BotAdmin(
+                chat_id=chat_id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                role="super_admin",
+                is_active=True,
+                created_by=chat_id,
+            ))
+            logger.info(f"Penerima notifikasi terdaftar: {chat_id} ({user.username})")
 
-    if existing:
-        await update.message.reply_text(
-            f"👋 <b>Selamat datang kembali, {existing.display_name}!</b>\n\n"
-            f"Anda terdaftar sebagai <b>{'Super Admin' if existing.role == 'super_admin' else 'Admin'}</b>.\n"
-            f"Gunakan /help untuk melihat daftar perintah.",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    # Auto-register super admin jika:
-    # 1. SUPER_ADMIN_CHAT_IDS dikonfigurasi dan chat_id ada di daftar
-    # 2. Atau belum ada admin sama sekali
-    admin_count = await db.count_bot_admins()
-
-    is_preconfigured = chat_id in SUPER_ADMIN_CHAT_IDS
-    is_first_admin = admin_count == 0
-
-    if is_preconfigured or is_first_admin:
-        new_admin = BotAdmin(
-            chat_id=chat_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            role="super_admin",
-            is_active=True,
-            created_by=chat_id if is_first_admin else None,
-        )
-        await db.add_bot_admin(new_admin)
-
-        await update.message.reply_text(
-            f"🎉 <b>Selamat datang, Super Admin!</b>\n\n"
-            f"Anda telah terdaftar sebagai super admin pertama.\n"
-            f"Nama: {new_admin.display_name}\n"
-            f"Chat ID: <code>{chat_id}</code>\n\n"
-            f"Gunakan /help untuk melihat daftar perintah.",
-            parse_mode=ParseMode.HTML,
-        )
-        logger.info(f"Super admin registered: {chat_id} ({user.username})")
-    else:
-        await update.message.reply_text(
-            "⛕ <b>Akses Ditolak</b>\n\n"
-            "Anda belum terdaftar sebagai admin bot.\n"
-            "Hubungi super admin untuk mendapatkan akses.",
-            parse_mode=ParseMode.HTML,
-        )
+    await update.message.reply_text(
+        f"👋 <b>Selamat datang, {user.first_name or 'User'}!</b>\n\n"
+        f"Gunakan /help untuk melihat daftar perintah.",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
